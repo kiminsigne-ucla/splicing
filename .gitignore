@@ -1,3 +1,5 @@
 /old/
-/*/produced_data/
+/*/produced_data/*.fastq
+/*/produced_data/*_alignment.txt
 /*/raw_data/
+/splicemod_lib/scripts/splicemod
