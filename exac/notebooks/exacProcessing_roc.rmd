@@ -1,0 +1,198 @@
+---
+title: "Making ExAC variant library (Chasin backbone)"
+author: "Rocky Cheung"
+date: '`r format(Sys.time(), "%d %B, %Y")`'
+output: html_notebook
+---
+
+## Loading packages ##
+```{r setup, include=FALSE, message=FALSE, warning=FALSE}
+library()
+pkg <- c("knitr","ggplot2", "dplyr", "reshape2", "readr", "RColorBrewer", "tidyr", "lazyeval", "Biostrings", "parallel", "purrr", "grDevices", "stringr", "scales", "cowplot")
+sapply(pkg, library, character.only = TRUE)
+opts_chunk$set(dev = 'pdf')
+
+mainDir <- "~/g/manuscript/data/"
+
+```
+
+## Main plots, based on ExAC MiSeq ##
+```{r include=FALSE, message=FALSE, warning=FALSE}
+###########################################################################################################
+###########################################################################################################
+# Goal: Get library FASTA header info for join later with exon count files
+# specify "drop" as columns to drop later
+
+mainDir <- "~/g/manuscript/data/"
+
+# calling customized R functions
+setwd(file.path(mainDir, "R_scripts"))
+source("skipLib_plots.R")
+source("color_palette.R")
+
+drop <- c("drop")
+
+###########################################################################################################
+# Read natural fasta file for headers
+###########################################################################################################
+
+setwd(file.path(mainDir, "ref"))
+
+fa.nat = readDNAStringSet("exac_nat_ref_v2.fa") # Get headers into data frame
+nat.info <- names(fa.nat) %>% str_split_fixed(" ", 5) %>% data.frame    # Get headers into data frame
+colnames(nat.info) <- c("ensembl_id", "lib.seq_region", "drop","strand", "len")    # Specify column names in data frame   
+nat.info <- nat.info[,!(names(nat.info) %in% drop)]     # Dropping unnecessary columns
+nat.info <- nat.info %>% mutate(len = gsub("len=", "", len ) ) 
+
+###########################################################################################################
+# Read mutant fasta file for headers 
+###########################################################################################################
+
+fa.mut = readDNAStringSet("exac_mut_ref_v2.fa")
+mut.info <- names(fa.mut) %>% str_split_fixed(" ", 15) %>% data.frame    # Get headers into data frame
+colnames(mut.info) <- c("ensembl_id", "lib.seq_region", "drop", "strand", "len", "drop", "ref1", "drop", "alt1", "drop", "SNPpos", "drop", "vcf_id", "drop", "rel_pos")    # Specify column names in data frame   
+mut.info <- mut.info[,!(names(mut.info) %in% drop)]     # Dropping unnecessary columns
+mut.info <- mut.info %>% mutate(len = gsub("len=", "", len ) )
+
+###########################################################################################################
+# Read control fasta file for headers 
+###########################################################################################################
+
+fa.ctrl = readDNAStringSet("exac_cont_ref_v2.fa")
+ctrl.info <- names(fa.ctrl) %>% str_split_fixed(" ", 13) %>% data.frame
+colnames(ctrl.info) <- c("ensembl_id", "lib.seq_region", "drop", "strand", "len", "drop", "ref1", "drop", "alt1", "drop", "ref2", "drop", "alt2")      # Specify column names in data frame
+ctrl.info <- ctrl.info[,!(names(ctrl.info) %in% drop)]   # Dropping unnecessary columns
+
+#cleaning data-frame
+ctrl.info <- ctrl.info %>% 
+  mutate(ref1 = gsub(";", "", ref1) ) %>%
+  mutate(ref2 = gsub(";", "", ref2) ) %>%
+  mutate(len = gsub("len=", "", len ) ) 
+
+###########################################################################################################
+# Assigning unnormalized exon counts to data-frame
+###########################################################################################################
+
+setwd(file.path(mainDir, "all_counts"))
+
+header <- c("ensembl_id","seq","DP1S1", "DP2S1", "DP1S2", "DP2S2", "INT1S1", "INT2S1", "INT1S2", "INT2S2", "SP1S1", "SP2S1", "SP1S2-1", "SP1S2-2", "SP2S2-1", "SP2S2-2", "R1-PS", "R2-PS")
+
+nat.count <- read.csv("201609_nat_countsPerbin.csv", header = F, check.names=FALSE)
+mut.count <- read.csv("201609_mut_countsPerbin.csv", header = F, check.names=FALSE)
+ctrl.count <- read.csv("201609_cont_countsPerbin.csv", header = F, check.names=FALSE)
+
+colnames(nat.count) <- header
+colnames(mut.count) <- header
+colnames(ctrl.count) <- header
+
+count.combined <- bind_rows(nat.count, mut.count, ctrl.count)
+
+###########################################################################################################
+# Filter exon counts above certain threshold
+##########################################################################################################
+
+# SORT 2 ONLY
+count.combined <- count.combined %>%
+    mutate (all_r1 = DP1S2 + INT1S2 + `SP1S2-1` + `SP1S2-2`, all_r2 = DP2S2 + INT2S2 + `SP2S2-1` + `SP2S2-2`) %>%   # sort 2 only
+    filter (all_r1 >= 3 & all_r2 >= 3) 
+ 
+###########################################################################################################
+# Normalize exon counts: Normalization based on read counts and bin distribution
+###########################################################################################################
+
+readCount <- c(1808244, 3035241, 1533869, 2243075, 2527635, 1568824, 2089631, 2283054, 2342513, 1830639, 3120032, 983142, 2111531, 935900, 1925196, 1692224)     #unit: reads
+readCount <- readCount / 1000000  #unit: M (million) reads
+binDist <- c(0.098, 0.097, 0.092, 0.091, 0.107, 0.104, 0.127, 0.122, 0.650, 0.648, 0.596, 0.596, 0.603, 0.603, 1, 1)    #unit: sorted proportion (0 to 1)
+normFactor <- readCount / binDist   #calculate normalization Factor
+
+colCount <- c("DP1S1", "DP2S1", "DP1S2", "DP2S2", "INT1S1", "INT2S1", "INT1S2", "INT2S2", "SP1S1", "SP2S1", "SP1S2-1", "SP1S2-2", "SP2S2-1", "SP2S2-2", "R1-PS", "R2-PS")
+count.combined[colCount] <- count.combined[colCount] / normFactor
+
+count.combined$SP1S2 <- round ( (count.combined$`SP1S2-1` * readCount[11] + count.combined$`SP1S2-2` * readCount[12]) / ( readCount[11] + readCount[12] ) , 2)
+count.combined$SP2S2 <- round ( (count.combined$`SP2S2-1` * readCount[13] + count.combined$`SP2S2-2` * readCount[14]) / ( readCount[13] + readCount[14] ) , 2)
+count.combined <- count.combined %>% select (-c(`SP1S2-1`, `SP1S2-2`, `SP2S2-1`, `SP2S2-2`))
+count.combined <- na.omit(count.combined)
+
+# fixing the ensembl_id to separate out original ensembl_id from perfect/imperfect additional annotation (separated by ".")
+count.combined <- count.combined[,c(1:12, 17:18, 13:16)] %>% 
+  separate(ensembl_id, c("ensembl_id","perfect_id"), "\\.")  #separate perfect/imperfect indexing information for the joints below
+
+# Merge counts and exon info data-frames to retain data common to both sets
+nat.df <- inner_join(nat.info, count.combined, by = "ensembl_id")
+mut.df <- inner_join(mut.info, count.combined, by = "ensembl_id")
+ctrl.df <- inner_join(ctrl.info, count.combined, by = "ensembl_id")
+df <- bind_rows(nat.df, mut.df, ctrl.df)
+
+df <- df %>%
+  separate(lib.seq_region, c("lib.seq_region_tmp","lib.seq_region_end"), "-") %>%
+  separate(lib.seq_region_tmp, c("chr","lib.seq_region_start"), ":") %>% 
+  mutate_each(funs(as.numeric), starts_with("lib")) %>% 
+  separate(len, c("intron1_len","exon_len","intron2_len"), "\\.") %>% 
+  mutate_each(funs(as.numeric), ends_with("len")) %>%
+  separate(ensembl_id, c("ensembl_id","eid_sub"), "_") %>%  #separate for homogeneous ensembl_id for left_join later
+  mutate_each(funs(as.character), c(rel_pos, SNPpos, vcf_id)) %>%    #convert factor to character
+  mutate_each(funs(as.numeric), c(rel_pos, SNPpos, vcf_id)) %>%    #convert character to numeric
+  mutate(chr = gsub("chr", "", chr), 
+         intron2_len = ifelse ( (strand == "-"), (170 - exon_len - intron2_len), intron2_len), 
+         intron1_len = ifelse ( (strand == "-"), (170 - exon_len - intron1_len), intron1_len) )  # Mutate intron lengths back to strand-agnostic mode, fixing length annotation
+
+  
+##############################################################################################################
+# Rounding indexes
+##############################################################################################################
+df <- df %>% 
+  mutate (  # replicate 1
+          index.r1s1 = round ( (DP1S1*0 + INT1S1*0.85 + SP1S1*1) / (DP1S1 + INT1S1 + SP1S1), 3), # not used  
+          index.r1s2 = round ( (DP1S2*0 + INT1S2*0.85 + SP1S2*1) / (DP1S2 + INT1S2 + SP1S2), 3),
+           # replicate 2
+          index.r2s1 = round ( (DP2S1*0 + INT2S1*0.85 + SP2S1*1) / (DP2S1 + INT2S1 + SP2S1), 3), # not used  
+          index.r2s2 = round ( (DP2S2*0 + INT2S2*0.85 + SP2S2*1) / (DP2S2 + INT2S2 + SP2S2), 3),
+          
+          index_r1 = index.r1s2, #use sort 2 only
+          index_r2 = index.r2s2, #use sort 2 only
+          index_ori = round ( ( index_r1 + index_r2 ) / 2  , 3 ) )                                      
+
+##############################################################################################################
+# creating tbl for all ensembl_id that contains natural sequence 0 for left-join
+##############################################################################################################
+
+df <- df %>% unite(eid_sub, eid_sub, perfect_id, sep=".")
+df.nat_subset <- df[df$eid_sub == "000.0000", ]
+nat_subset <- df.nat_subset %>% select(ensembl_id, index_ori)
+colnames(nat_subset)[2] <- "PSI_nat"
+
+##############################################################################################################
+# calculate PSI: subtracting index_ori and PSI_nat, use only sort 2
+##############################################################################################################
+
+df <- left_join(df, nat_subset, by = "ensembl_id") %>% mutate(deltaPSI = round ( (index_ori - PSI_nat), 3 ) )
+
+# sort 2 only
+rm(df.nat_subset, nat_subset)
+
+# get rid of lines where there aren't any corresponding natural exon data 
+# df <- df[complete.cases(df$PSI_nat), ]
+# df <- df[complete.cases(df$index_ori), ]
+
+## New Filtering Criteria
+df <- df %>% 
+  mutate (r1.dp_percent = round ( DP1S2 * 100 / (DP1S2 + SP1S2 + INT1S2), 2), 
+          r1.sp_percent = round ( SP1S2  * 100 / (DP1S2 + SP1S2 + INT1S2), 2), 
+          r1.int_percent = round ( INT1S2  * 100 / (DP1S2 + SP1S2 + INT1S2), 2),
+          r2.dp_percent = round ( DP2S2  * 100 / (DP2S2 + SP2S2 + INT2S2), 2), 
+          r2.sp_percent = round ( SP2S2  * 100 / (DP2S2 + SP2S2 + INT2S2), 2), 
+          r2.int_percent = round ( INT2S2 * 100 / (DP2S2 + SP2S2 + INT2S2), 2)
+          ) 
+
+# write output file for correlation analysis
+write.table(df, file = "normCounts_EXAC.csv", append = FALSE, quote = FALSE, sep = ",",
+            eol = "\n", na = "NA", dec = ".", row.names = FALSE,
+            col.names = TRUE, qmethod = c("escape", "double"),
+            fileEncoding = "")
+
+# df <- df[! ( ( df$r1.dp_percent>30 & df$r1.sp_percent>30 ) | ( df$r2.dp_percent>30 & df$r2.sp_percent>30 ) | abs(df$index.r1s2 - df$index.r1r2s2) > 0.30  ), ]
+
+good_ensembl_id <- df %>% filter(grepl("000.0000", eid_sub)) %>% select(ensembl_id) %>% unlist
+# example to generate summary
+# summary ( df.id %>% filter ( df.id$eid_sub == "BRK" & deltaPSI < -50.0 ) ) 
+```
