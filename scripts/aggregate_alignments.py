@@ -9,7 +9,8 @@ are simple tab-separated text files, where the first column is the sequence ID
 the read mapped to and the second column is the sequence. Each alignment file
 corresponds to a different sample. This script aggregates all of the information
 into one output file, where each row is a different sequence ID and each column
-is the count of that sequence in that sample.
+is the count of that sequence in that sample. It also adds the sequence
+information for each sequence.
 
 """
 
@@ -17,6 +18,7 @@ import argparse
 import pandas as pd
 import os
 from collections import Counter
+from helpful_utils import fasta_reader
 
 if __name__ == '__main__':
 
@@ -24,6 +26,7 @@ if __name__ == '__main__':
 	parser.add_argument('filenames', 
 		help='.txt file of filenames of alignments to aggregate')
 	parser.add_argument('output', help='name of output file')
+	parser.add_argument('ref', help='name of reference file')
 
 	args = parser.parse_args()
 
@@ -33,8 +36,9 @@ if __name__ == '__main__':
 		for filename in filenames:
 			filename = filename.strip()
 			with open(filename) as alignment:
-				# id is first column, sequence is second column
-				ids = [line.split('\t')[0] for line in alignment]
+				# id is first column, sequence is second column,
+				# remove leading '>'
+				ids = [line.split('\t')[0].replace('>', '') for line in alignment]
 				# count occurrences of ids, convert to data frame. IDs will be index,
 				# counts will be first column
 				sample_counts = pd.DataFrame.from_dict(dict(Counter(ids)), orient='index')
@@ -46,5 +50,8 @@ if __name__ == '__main__':
 
 	# fill in NaN's with 0
 	alignments.fillna(0, inplace=True)
+	# add sequence information to each ID
+	# lib = fasta_reader(args.ref)
+	
 	# write csv
 	alignments.to_csv(args.output, index_label='id')
