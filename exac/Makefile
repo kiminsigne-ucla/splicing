@@ -12,7 +12,6 @@
 SHELL := /bin/bash
 SOURCE_DATA := /data/projects/splicing/raw_data/201609_exac
 DATA := raw_data/201609_exac
-SCRIPTS := ../scripts # path to master splicing scripts
 
 # programs
 BBMERGE := bbmerge.sh
@@ -43,7 +42,7 @@ setup :
 	@#	simplify names for later dependecies. 
 	@# Dependencies:
 	@#	None. This rule will run every time, overwriting symlinks if they exist.
-	@ echo "Creating data links... (will run everytime)"
+	@ echo "Creating data links ... (will run everytime)"
 	@ ../scripts/symlink_reformat_fastq_names.sh $(SOURCE_DATA) $(DATA)
 
 # -----------------------------------------------------------------------------
@@ -68,29 +67,23 @@ produced_data/%_merged.fastq : $(DATA)/%_R1.fastq $(DATA)/%_R2.fastq
 		outu1=produced_data/$(subst .fastq,_unmerged.fastq,$(notdir $(word 1, $^))) \
 		outu2=produced_data/$(subst .fastq,_unmerged.fastq,$(notdir $(word 2, $^)))
 
-# merge : $(patsubst %,produced_data/%_merged.fastq,$(BASE))
-# 	@# Actions:
-# 	@#	Dummy rule that triggers merging of paired reads, use this as placeholder
-# 	@#	for end of pipleine
-# 	@# Dependencies:
-# 	@#	merged fastq files
 
-produced_data/%_perfect_alignment.txt : produced_data/%_merged.fastq $(SCRIPTS)/perfect_alignment.py
+produced_data/%_perfect_alignment.txt : produced_data/%_merged.fastq ../scripts/perfect_alignment.py
 	@# Actions:
 	@#	Align sequences to reference FASTA file
 	@# Dependencies:
 	@#	merged FASTQ files from previous step.
 	@ echo "Aligning" $(subst _perfect_alignment.txt,, $(notdir $@))
-	@ python $(SCRIPTS)/perfect_alignment.py -i $< -r ref/exac_ref_v2_all.fa -o $@
+	@ python ../scripts/perfect_alignment.py -i $< -r ref/exac_ref_v2_all.fa -o $@
 
 
-produced_data/all_alignments.csv : $(patsubst %,produced_data/%_perfect_alignment.txt,$(BASE)) $(SCRIPTS)/aggregate_alignments.py
+produced_data/all_alignments.csv : $(patsubst %,produced_data/%_perfect_alignment.txt,$(BASE)) ../scripts/aggregate_alignments.py
 	@# Actions:
 	@#	Aggregate all perfect alignments into one file
 	@# Dependencies:
 	@#	perfect alignment files in produced_data/ from the previous step
 	@ echo "Aggregating alignments..."
 	@ ls produced_data/*perfect_alignment.txt > produced_data/alignment_list.txt
-	@ python $(SCRIPTS)/aggregate_alignments.py produced_data/alignment_list.txt $@
+	@ python ../scripts/aggregate_alignments.py produced_data/alignment_list.txt $@
 	@ rm produced_data/alignment_list.txt
 
