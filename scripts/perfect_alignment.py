@@ -41,14 +41,15 @@ def main():
             break
 
         header = next_line[0].split()
-        mut = "nat_seq"             # default category is "natural sequence"
-        if "MD:Z" in next_line[0]:
-            mut = "imperfect_seq"
-        if "cat=" in next_line[0]:     # parsing info only from splice-code ref files (chip 1)
-            mut = header[6][:-1]    # parses mutant category information
+        # mut = "nat_seq"             # default category is "natural sequence"
+        # if "MD:Z" in next_line[0]:
+        #     mut = "imperfect_seq"
+        # if "cat=" in next_line[0]:     # parsing info only from splice-code ref files (chip 1)
+        #     mut = header[6][:-1]    # parses mutant category information
 
         # take first 5 columns from header and "category info"
-        ID = header[0] + " " + header[1] + " " + header[2] + " " + header[3] + " " + header[4] + " " + mut   
+        # ID = header[0] + " " + header[1] + " " + header[2] + " " + header[3] + " " + header[4] + " " + mut   
+        ID = header[0] + " " + header[1] + " " + header[2] + " " + header[3] + " " + header[4]  
         sequence = next_line[1].strip().upper() 
         lib[sequence] = ID
         
