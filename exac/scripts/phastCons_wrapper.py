@@ -7,6 +7,9 @@ given interval region, as defined in the sorted input bed file.
 import argparse
 import pandas as pd
 import numpy as np
+import gzip
+import multiprocessing
+from functools import partial
 
 
 # wig functions courtesty of Chris Hartl
@@ -78,40 +81,91 @@ def bed_iter(filename):
 				chr_info.append(interval)
 
 
+def chrom_extract_cons(chrom_region, cons_folder):
+	"""
+	This function takes as input a chromosome (e.g. chr9) and regions in that
+	chromosome as parsed by bed_iter(). It opens the appropriate wig file and
+	extracts the mean conservation scores for each region.
 
-def main(bed, cons_folder, output):
+	chrom_region: chromosome regions, list of lists. Each element in the list is a
+	region, which is itself a list with four fields (chromosome, start, end, name).
+	This is the format returned from bed_iter()
+	cons_folder: directory where conservation files are located
+
+	return: chrom_region with an extra field for conservation added to each region
+	"""
+	# suffix common to all files
+	cons_suffix = '.phastCons100way.wigFix.gz'
+	# get chromosome from chrom_region
+	chrom = chrom_region[0][0]
+	# open appropriate wig file
+	wig = WigReader(cons_folder + chrom + cons_suffix)
+	for region in chrom_region:
+		# region format: [chrN, start, end, name]
+		# outputs tuple, (position, score)
+		cons_scores = get_interval(iter(wig), (int(region[1]), int(region[2])))
+		# get average
+		cons_mean = np.mean([x[1] for x in cons_scores])
+		# add conservation mean to region information, output to file
+		region.append(str(cons_mean))
+	
+	return chrom_region
+
+
+
+# def main(bed, cons_folder, output):
+
+# 	outfile = open(output, 'w')
+
+# 	bed_chroms = bed_iter(bed)
+# 	cons_suffix = '.phastCons100way.wigFix'
+
+# 	for chrom_region in bed_chroms:
+# 		chrom = chrom_region[0][0]
+# 		print "Working on chromosome ", str(chrom)
+# 		# open appropriate wig file
+# 		wig = WigReader(cons_folder + chrom + cons_suffix)
+# 		for region in chrom_region:
+# 			# outputs tuple, (position, score)
+# 			cons_scores = get_interval(iter(wig), (int(region[1]), int(region[2])))
+# 			# get average
+# 			cons_mean = np.mean([x[1] for x in cons_scores])
+# 			# add conservation mean to region information, output to file
+# 			region.append(str(cons_mean))
+# 			outfile.write('\t'.join(region)+'\n')
+
+# 	outfile.close()
+
+def main(bed, cons_folder, output, num_processes):
 
 	outfile = open(output, 'w')
 
 	bed_chroms = bed_iter(bed)
-	cons_suffix = '.phastCons100way.wigFix'
+	
+	pool = multiprocessing.Pool(processes=num_processes)
 
-	for chrom_region in bed_chroms:
-		chrom = chrom_region[0][0]
-		print "Working on chromosome ", str(chrom)
-		# open appropriate wig file
-		wig = WigReader(cons_folder + chrom + cons_suffix)
-		for region in chrom_region:
-			# outputs tuple, (position, score)
-			cons_scores = get_interval(iter(wig), (int(region[1]), int(region[2])))
-			# get average
-			cons_mean = np.mean([x[1] for x in cons_scores])
-			# add conservation mean to region information, output to file
-			region.append(str(cons_mean))
-			outfile.write('\t'.join(region)+'\n')
-
-	outfile.close()
+	# assign constant parameter to function
+	func = partial(chrom_extract_cons, cons_folder=cons_folder)
+	# map each chromosome in bed_chroms to the function and run in parallel
+	cons_scores = pool.map(func, bed_chroms)
+    # write to file
+	with open(output, 'w') as outfile:
+		for chrom_region in cons_scores:
+			for region in chrom_region:
+				outfile.write('\t'.join(region)+'\n')
 
 
 if __name__ == '__main__':
 	parser = argparse.ArgumentParser('wrapper for accessing phastCons files.\
 		Returns average conservation score for regions defined in BED file')
 	parser.add_argument('bed', help='BED file of interval regions.')
-	parser.add_argument('cons_folder', help='path to folder with phastCons files')
+	parser.add_argument('cons_folder', help='path to folder with compressed phastCons files')
 	parser.add_argument('output', help='name of output file')
+	parser.add_argument('num_processes', help='number of parallel processes',
+		default=3)
 
 	args = parser.parse_args()
-	main(args.bed, args.cons_folder, args.output)
+	main(args.bed, args.cons_folder, args.output, args.num_processes)
 		
 
 
