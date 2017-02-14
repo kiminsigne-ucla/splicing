@@ -76,6 +76,31 @@ def get_interval(itr, interval, curr_base=None):
     # is ever skipped
 
 
+# def bed_iter(filename):
+# 	"""
+# 	Iterate through a bed file, yielding all intervals for one chromosome
+# 	"""
+# 	with open(filename) as bed:
+# 		# initialize 
+# 		chr_info = []
+# 		interval = next(bed).strip().split('\t')
+# 		# format: chr, start, end, name
+# 		curr_chrom = interval[0]
+# 		chr_info.append(interval)
+# 		for line in bed:
+# 			interval = line.strip().split('\t')
+# 			chrom = interval[0]
+# 			if chrom != curr_chrom:
+# 				yield chr_info
+# 				chr_info = []
+# 				print curr_chrom, chrom
+# 				curr_chrom = chrom
+# 			else:
+# 				chr_info.append(interval)
+# 			if not line: # end of file
+# 				print "Hello"
+# 				yield chr_info
+
 def bed_iter(filename):
 	"""
 	Iterate through a bed file, yielding all intervals for one chromosome
@@ -94,8 +119,9 @@ def bed_iter(filename):
 				yield chr_info
 				chr_info = []
 				curr_chrom = chrom
-			else:
-				chr_info.append(interval)
+			chr_info.append(interval)
+		# end of file
+		yield chr_info
 
 
 def chrom_extract_cons(chrom_region, cons_folder):
