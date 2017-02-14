@@ -145,30 +145,6 @@ def chrom_extract_cons(chrom_region, cons_folder):
 	return chrom_region
 
 
-
-# def main(bed, cons_folder, output):
-
-# 	outfile = open(output, 'w')
-
-# 	bed_chroms = bed_iter(bed)
-# 	cons_suffix = '.phastCons100way.wigFix'
-
-# 	for chrom_region in bed_chroms:
-# 		chrom = chrom_region[0][0]
-# 		print "Working on chromosome ", str(chrom)
-# 		# open appropriate wig file
-# 		wig = WigReader(cons_folder + chrom + cons_suffix)
-# 		for region in chrom_region:
-# 			# outputs tuple, (position, score)
-# 			cons_scores = get_interval(iter(wig), (int(region[1]), int(region[2])))
-# 			# get average
-# 			cons_mean = np.mean([x[1] for x in cons_scores])
-# 			# add conservation mean to region information, output to file
-# 			region.append(str(cons_mean))
-# 			outfile.write('\t'.join(region)+'\n')
-
-# 	outfile.close()
-
 def main(bed, cons_folder, output, num_processes):
 
 	outfile = open(output, 'w')
@@ -194,8 +170,8 @@ if __name__ == '__main__':
 	parser.add_argument('bed', help='BED file of interval regions.')
 	parser.add_argument('cons_folder', help='path to folder with compressed phastCons files')
 	parser.add_argument('output', help='name of output file')
-	parser.add_argument('num_processes', help='number of parallel processes',
-		default=3)
+	parser.add_argument('num_processes', type=int, default=3,
+		help='number of parallel processes')
 
 	args = parser.parse_args()
 	main(args.bed, args.cons_folder, args.output, args.num_processes)
