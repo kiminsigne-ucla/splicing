@@ -48,15 +48,32 @@ def in_interval(pos, interval):
     return interval[0] <= pos <= interval[1]
 
 
-def get_interval(itr, interval):
-    e = next(itr)
-    while e[0] < interval[0]:
-        e = next(itr)
-    while in_interval(e[0], interval):
-        yield e
-        e = next(itr)
-    # note: skips first base outside of interval, but ours are
-    # not overlapping
+# def get_interval(itr, interval):
+#     e = next(itr)
+#     while e[0] < interval[0]:
+#         e = next(itr)
+#     while in_interval(e[0], interval):
+#         yield e
+#         e = next(itr)
+#     # note: skips first base outside of interval, but ours are
+#     # not overlapping
+
+
+def get_interval(itr, interval, curr_base=None):
+	if not curr_base:
+		# initialize
+		e = next(itr)
+	else:
+		# start at current base, do not iterate through an extra base
+		e = curr_base
+	while e[0] < interval[0]:
+		e = next(itr)
+	while in_interval(e[0], interval):
+		yield e 
+		e = next(itr)
+	yield e      
+    # note: will always yield one base outside of region so that no base
+    # is ever skipped
 
 
 def bed_iter(filename):
@@ -100,15 +117,31 @@ def chrom_extract_cons(chrom_region, cons_folder):
 	chrom = chrom_region[0][0]
 	# open appropriate wig file
 	wig = WigReader(cons_folder + chrom + cons_suffix)
+
+	# initialize iter with first region
+	# region format: [chrN, start, end, name]
+	# outputs tuple, (position, score)
+	first_region = chrom_region.pop(0)
+	cons_scores = list(get_interval(iter(wig), (int(first_region[1]), int(first_region[2]))))
+	# pop first base outside interval from end of list
+	curr_base = cons_scores.pop()
+	# get average
+	cons_mean = np.mean([x[1] for x in cons_scores])
+	first_region.append(str(cons_mean))
+
+
 	for region in chrom_region:
-		# region format: [chrN, start, end, name]
-		# outputs tuple, (position, score)
-		cons_scores = get_interval(iter(wig), (int(region[1]), int(region[2])))
+		# initialize with current base so that no base is ever skipped
+		cons_scores = list(get_interval(iter(wig), (int(region[1]), int(region[2])),
+			curr_base=curr_base))
+		# pop first base outside interval from end of list
+		curr_base = cons_scores.pop()
 		# get average
 		cons_mean = np.mean([x[1] for x in cons_scores])
-		# add conservation mean to region information, output to file
 		region.append(str(cons_mean))
 	
+	# finally, add the first region we popped in the beginning
+	chrom_region.insert(1, first_region)
 	return chrom_region
 
 
