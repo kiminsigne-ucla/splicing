@@ -134,8 +134,9 @@ def chrom_extract_cons(chrom_region, cons_folder):
 		# initialize with current base so that no base is ever skipped
 		cons_scores = list(get_interval(iter(wig), (int(region[1]), int(region[2])),
 			curr_base=curr_base))
-		# pop first base outside interval from end of list
-		curr_base = cons_scores.pop()
+		if len(cons_scores) >= 1:
+			# pop first base outside interval from end of list
+			curr_base = cons_scores.pop()
 		# get average
 		cons_mean = np.mean([x[1] for x in cons_scores])
 		region.append(str(cons_mean))
