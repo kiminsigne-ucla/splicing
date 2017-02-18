@@ -18,6 +18,7 @@ import re
 import sys
 import argparse
 from itertools import islice
+from helpful_utils import reverse_complement
 
 def main():
 
@@ -52,6 +53,8 @@ def main():
         ID = header[0] + " " + header[1] + " " + header[2] + " " + header[3] + " " + header[4]  
         sequence = next_line[1].strip().upper() 
         lib[sequence] = ID
+        # add reverse complement
+        lib[reverse_complement(sequence)] = ID
         
     while True:
         # one entry is four lines in FASTQ format

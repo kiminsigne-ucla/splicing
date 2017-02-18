@@ -26,7 +26,6 @@ if __name__ == '__main__':
 	parser.add_argument('filenames', 
 		help='.txt file of filenames of alignments to aggregate')
 	parser.add_argument('output', help='name of output file')
-	parser.add_argument('ref', help='name of reference file')
 
 	args = parser.parse_args()
 
@@ -49,9 +48,7 @@ if __name__ == '__main__':
 				alignments = alignments.join(sample_counts, how='outer', sort=True)
 
 	# fill in NaN's with 0
-	alignments.fillna(0, inplace=True)
-	# add sequence information to each ID
-	# lib = fasta_reader(args.ref)
-	
+	alignments.fillna(0, inplace=True)	
+
 	# write csv
 	alignments.to_csv(args.output, index_label='id')
