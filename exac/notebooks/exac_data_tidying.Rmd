@@ -16,89 +16,228 @@ library(ggplot2)
 library(cowplot)
 options(stringsAsFactors = F)
 
-knitr::opts_chunk$set(warning=FALSE, message=F)
-
-data <- read.csv('../produced_data/all_alignments.csv')
+knitr::opts_chunk$set(warning = FALSE, message = F)
+setwd("~/Documents/projects/splicing/exac/notebooks")
 ```
 
 All of read alignment data for each sample is contained in `all_alignments.csv`. The rows correspond to different sequences, referenced by Ensembl IDs and other information in the header. Each column corresponds to a different sample, and the number is the count of that sequence in that sample. The sample names follow the format 'DP1S1'. There are three sample types, double positive (DP), single positive (SP), and intermediate (INT). The number following the sample type corresponds to the replicate number (1 or 2). DP refers to both a GFP and RFP signal, indicating the exon was skipped. SP refers to single positive, indicating there was only RFP and no GFP and that the exon was included. Intermediate refers to a GFP/RFP ratio that falls in between double and single positive. There are three sort types, sort 1 (S1), sort 2 (S2) and pre-sort (PS). Sort 1 refers to the initial sorting of the library into three bins. This initial sort is not very precise, so a second sort was performed on the entire population from the first sort. The library was also sequenced prior to sorting (pre-sort).
 
 We only care about the second sort, so filter out samples that end with 'S1' (sort 1)
 
-```{r trim_columns}
-data <- select(data, -ends_with('S1'))
+```{r}
+data <- read.csv('../produced_data/all_alignments.csv') %>% 
+    select(-ends_with('S1')) %>% 
+    rename(DP_R1 = DP1S2, DP_R2 = DP2S2, INT_R1 = INT1S2, INT_R2 = INT2S2,
+           PS_R1 = R1.PS, PS_R2 = R2.PS, SP_R1 = SP1S2, SP_R2 = SP2S2)
 ```
 
-Next, let's normalize the read counts. To normalize for sequencing depeth, we divide each count by the number of million reads per sample. To account for the different proportion of cells in each bin, we multiply each by its proportion relative to the presort (this is determined from the sorting, use hard-coded values).
+Next, let's normalize the read counts. To normalize for sequencing depth, we divide each count by the number of million reads per sample. To account for the different proportion of cells in each bin, we multiply each by its proportion relative to the presort (this is determined from the sorting, use hard-coded values).
 
 ```{r normalize}
 data <- data %>%
     select(-id) %>% 
     mutate_each(funs(norm = . / (sum(.) / 1000000))) %>% 
-    select(ends_with('norm')) %>% # get rid of original un-normalized columns
     bind_cols(select(data, id), .)
 
 # proportion of cells in each bin (relative to pre-sort)
 # DP1S2, DP2S2, INT1S2, INT2S2, PS_R1, PS_R2, SP1S2, SP2S2
 bin_prop <- c( 0.092, 0.091,  0.127, 0.122, 1, 1, 0.596, 0.603)
 
-# rename for convenience
-colnames(data) <- c('header', 'DP_R1', 'DP_R2', 'INT_R1', 'INT_R2', 'PS_R1', 'PS_R2', 'SP_R1', 'SP_R2')
-
 # multiply each bin count by bin proportion
-data <- cbind(header = data$header, data.frame(mapply(`*`, select(data, DP_R1:SP_R2), bin_prop, SIMPLIFY = FALSE)))
+data <- bind_cols(select(data, header = id, DP_R1:SP_R2), 
+                  data.frame(mapply(`*`, select(data, DP_R1_norm:SP_R2_norm), 
+                                    bin_prop, SIMPLIFY = FALSE)))
 ```
 
 Now time to parse the id into separate columns.
 ```{r parse_header}
-# small substitutions so separate will work easier
-data$header <- gsub('strand= ', 'strand=', data$header)
-data$header <- gsub('>', '', data$header)
 data <- data %>%
+    # small substitutions so separate will work easier
+    mutate(header = gsub('strand= ', 'strand=', header),
+           header = gsub('>', '', header)) %>% 
     separate(header, into = c('id', 'chr', 'strand', 'length', 'category'), sep = ' ') %>% 
     separate(chr, c('chr', 'region'), sep = ':') %>%
-    separate(region, c('start', 'end'), sep = '-', fill = 'right') %>%
-    separate(id, c('ensembl_id', 'sub_id'), sep = '_', remove = F)
-
-# get rid of leftover field identifiers    
-data$strand <- gsub('strand=', '', data$strand)
-data$length <- gsub('len=', '', data$length)
-
-# convert to numeric
-data$chr <- as.numeric(gsub('chr', '', data$chr))
-data$start <- as.numeric(data$start)
-data$end <- as.numeric(data$end)
-
-# finally, separate length into intron-exon-intron lengths
-data <- data %>%
-    extract(length, c("intron1_len","exon_len","intron2_len"), "([[:alnum:]]+).([[:alnum:]]+).([[:alnum:]]+)")
-
-data$intron1_len <- as.numeric(data$intron1_len)
-data$intron2_len <- as.numeric(data$intron2_len)
-data$exon_len <- as.numeric(data$exon_len)
-
-# update the category to either control, natural, or mutant
-data <- data %>% 
+    separate(region, c('start', 'end'), sep = '-', fill = 'right', convert = T) %>%
+    separate(id, c('ensembl_id', 'sub_id'), sep = '_', remove = F) %>% 
+    # get rid of leftover field identifiers
+    mutate(strand = gsub('strand=', '', strand),
+           length = gsub('len=', '', length)) %>% 
+    # finally, separate length into intron-exon-intron lengths
+    extract(length, c("intron1_len","exon_len","intron2_len"),
+            "([[:alnum:]]+).([[:alnum:]]+).([[:alnum:]]+)", convert = T) %>% 
+    # update the category to either control, natural, or mutant
     # ifelse() structure: ifelse(condition, action if true, action if false)
-    mutate(category = ifelse(endsWith(id, '000'), 'natural', 'mutant')) %>% 
-    mutate(category = ifelse(endsWith(id, 'BRK'), 'control', category))
+    mutate(category = ifelse(endsWith(id, '000'), 'natural', 'mutant'), 
+           category = ifelse(endsWith(id, 'BRK'), 'control', category),
+           category = ifelse(endsWith(id, 'SKP'), 'control', category),
+           category = ifelse(startsWith(ensembl_id, 'RANDOM-EXON'), 'random_exon', category))
 ```
 
 Next, let's calculate a splicing index for each construct, a measure of how included an exon is. We will use a simple weighted average, where the double positive has weight 0, intermediate weight 0.85, and single positive weight 1.
 
 ```{r splicing_index}
 data <- data %>%
-    mutate(index_R1 = (DP_R1*0 + INT_R1*0.85 + SP_R1*1) / (DP_R1 + INT_R1 + SP_R1),
-           index_R2 = (DP_R2*0 + INT_R2*0.85 + SP_R2*1) / (DP_R2 + INT_R2 + SP_R2))
+    mutate(index_R1 = (DP_R1_norm*0 + INT_R1_norm*0.85 + SP_R1_norm*1) / 
+               (DP_R1_norm + INT_R1_norm + SP_R1_norm),
+           index_R2 = (DP_R2_norm*0 + INT_R2_norm*0.85 + SP_R2_norm*1) / 
+               (DP_R2_norm + INT_R2_norm + SP_R2_norm))
 
 # replace NaN with NA
 data[data == 'NaN'] <- NA
 ```
 
 Let's take a quick peek at the data
-```{r index_graph}
+```{r index_viz}
 ggplot(data, aes(index_R1, index_R2)) + geom_point(alpha = 0.25) +
     labs(x = 'replicate 1 splicing index', y = 'replicate 2 splicing index',
          title = 'Comparison of splicing index across replicates')
 ```
+
+Next, let's filter by the natural sequence's level of inclusion. The library was originally designed from the top included exons from the splicemod library, so all the natural exons should be highly included. If not, we shouldn't consider these or any of their variants.
+
+```{r index_dist_viz} 
+ggplot(filter(data, category == 'natural'), aes(index_R1)) + 
+    geom_histogram(binwidth = 0.10) +
+    labs(x = 'exon inclusion index replicate 1', 
+         title = 'Distribution of exon inclusion index for natural sequences') 
+
+data <- data %>% 
+    filter(category == 'natural', index_R1 >= 0.90 | index_R2 >= 0.90) %>% 
+    semi_join(data, ., by = 'ensembl_id')
+    
+```
+
+Now, let's filter variants for sufficient read coverage. Let's only keep the sequence if it has at least three raw read counts in any of the samples.
+
+```{r filter_low_count}
+data <- data %>% 
+    select(id, DP_R1:SP_R2) %>% 
+    reshape2::melt(id.var = 'id') %>% 
+    group_by(id) %>% 
+    mutate(low_reads = ifelse(any(value >= 3), FALSE, TRUE)) %>% 
+    ungroup() %>% 
+    select(id, low_reads) %>% 
+    distinct() %>% 
+    right_join(data, by = 'id') %>% 
+    filter(low_reads == FALSE) %>% 
+    select(-low_reads, -(DP_R1:SP_R2)) # get rid of original un-normalized columns
+```
+
+Now we need to add in more information from the reference file, like what mutations were made and where.
+```{r format_ref}
+ref <- read.table('../ref/exac_ref_v2_all.txt', sep = '\t', 
+                  col.names = c('header', 'sequence')) %>% 
+    # remove spaces after equal signs and colons
+    mutate(header = gsub(': ', ':', gsub('= ', '=', header))) %>% 
+    # separate fields
+    separate(header, c('id', 'region', 'strand', 'len', 'ref_allele', 'alt_allele', 
+                       'snp_position', 'vcf_id', 'rel_position'), sep = ' ') %>% 
+    # remove labels
+    mutate(ref_allele = gsub('ref:', '', gsub('ref=', '', ref_allele)),
+           alt_allele = gsub('alt=', '', alt_allele))
+
+ref <- ref %>% 
+    # the BRK controls have different formatting for reference alleles, 
+    # separate these and deal with separately
+    filter(endsWith(id, 'BRK')) %>% 
+    # controls do not have SNP positions or VCF ids but have an additional set of reference and 
+    # alternate alleles which occupy these columns. Combine this information into the reference 
+    # and alternate allele columns
+    mutate(snp_position = gsub(';', '', gsub('ref=', '', snp_position)),
+           ref_allele = paste0(ref_allele, snp_position),
+           snp_position = NA,
+           vcf_id = gsub('alt=', '', vcf_id),
+           alt_allele = paste0(alt_allele, ';', vcf_id),
+           vcf_id = NA) %>% 
+    # combine back with reference
+    bind_rows(filter(ref, !endsWith(id, 'BRK'))) %>% 
+    # now re-format and convert the rest of the necessary columns
+    mutate(snp_position = as.numeric(gsub('pos=', '', snp_position)),
+           rel_position = as.numeric(gsub('rel_pos=', '', rel_position)),
+           vcf_id = as.numeric(gsub('vcf-id=', '', vcf_id)))
+
+# combine with data
+data <- left_join(data, 
+                  select(ref, -region, -strand, -len), by = 'id')
+```
+
+Next, let's filter out variants that do not agree well between replicates. To get an idea of this, let's calculate the difference in index between replicates.
+
+```{r replicate_qc_viz}
+data <- data %>% 
+    mutate(index_diff = abs(index_R1 - index_R2))
+ggplot(data, aes(index_diff)) + geom_histogram(binwidth = 0.05) +
+    labs(x = 'exon inclusion index absolute difference between replicates')
+```
+
+```{r test_cutoffs}
+for (cutoff in seq(0.1, 1, 0.1)) {
+    replicable <- data %>% 
+        filter(index_diff <= cutoff) %>% 
+        summarise(n = n())
+    print(paste("cutoff:", cutoff, ", percent kept:", replicable$n/nrow(data)))
+}
+```
+
+Let's set the threshold that the index must be within 0.10 between replicates. This will keep 61% of the data and is not very different from less stringent cutoffs.
+
+```{r replicate_filter_viz}
+data <- data %>% 
+    filter(index_diff <= 0.10)
+
+ggplot(data, aes(index_R1, index_R2)) + 
+    geom_point(alpha = 0.50) +
+    labs(x = 'exon inclusion index replicate 1',
+         y = 'exon inclusion index replicate 2',
+         title = 'exon inclusion index between replicates,\nfiltered for replicate agreement <= 0.1')
+```
+
+Finally, let's categorize calls as high confidence if the change between the natural and mutant sequence is >= 0.90.
+
+```{r dpsi}
+# calculate difference in splicing index between mutant and natural
+calculate_dpsi <- function(df){
+    nat_seq = filter(df, category == 'natural')
+    if ( nrow(nat_seq) == 0 ) { # control exon
+        ref_psi_R1 <- NA
+        ref_psi_R2 <- NA
+    }
+    else{
+        ref_psi_R1 <- nat_seq$index_R1
+        ref_psi_R2 <- nat_seq$index_R2
+    }
+    df <- df %>%
+        mutate(dpsi_R1 = df$index_R1 - ref_psi_R1,
+               dpsi_R2 = df$index_R2 - ref_psi_R2)
+    return(df)
+}
+
+data <- data %>% 
+    group_by(ensembl_id) %>% 
+    do(calculate_dpsi(.)) %>% 
+    ungroup()
+
+# get high confidence calls
+data <- data %>% 
+    # big change in splicing
+    filter(abs(dpsi_R1) >= 0.90 | abs(dpsi_R2) >= 0.90,
+           # replicates agree within 0.30
+           abs(index_R1 - index_R2) <= 0.30) %>% 
+    mutate(high_confidence = TRUE) %>% 
+    select(id, high_confidence) %>% 
+    left_join(data, .) %>% 
+    distinct() %>% 
+    mutate(high_confidence = ifelse(is.na(high_confidence), FALSE, TRUE))
+
+filter(data, high_confidence == T) %>% count()   
+```
+
+
+```{r save_data, echo=F}
+# save data
+saveRDS(data, file = '../produced_data/exac_data_clean.rds', compress = T)
+```
+
+
+
 

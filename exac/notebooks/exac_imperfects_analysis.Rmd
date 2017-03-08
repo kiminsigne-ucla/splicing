@@ -1,0 +1,153 @@
+---
+title: "ExAC Imperfects Analysis"
+output: html_notebook
+---
+
+```{r setup, echo=F, message=F, warning = F}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(cowplot)
+options(stringsAsFactors = F)
+
+knitr::opts_chunk$set(warning = FALSE, message = F)
+knitr::opts_chunk$set(tidy.opts = list(width.cutoff = 100), tidy = T)
+
+setwd("~/Documents/projects/splicing/exac/notebooks")
+
+data <- readRDS('../produced_data/exac_data_clean.rds')
+```
+
+
+First, let's read in the read counts for the imperfect sequences and calculate an exon inclusion index.
+```{r read_imperfect_counts}
+imperfect_counts <- read.csv('../produced_data/imperfect_alignments.csv', header = T)
+# only keep sort 2
+imperfect_counts <- select(imperfect_counts, -ends_with('S1'))
+imperfect_counts <- imperfect_counts %>% 
+    separate(id, c('mutant_id', 'unknown', 'cigar_string', 'alignment'), sep = ' ') %>% 
+    separate(mutant_id, c('ensembl_id', 'mutant_sub_id'), sep = '[.]', remove = F)
+```
+
+```{r normalize}
+# normalize
+imperfect_counts <- imperfect_counts %>%
+    select(DP1S2:SP2S2) %>%
+    # lower counts, reads per 100,000 instead of per million
+    mutate_each(funs(norm = . / (sum(.) / 100000))) %>% 
+    select(ends_with('norm')) %>% # get rid of original un-normalized columns
+    bind_cols(select(imperfect_counts, mutant_id:alignment), .)
+
+# rename for convenience
+colnames(imperfect_counts) <- c('mutant_id', 'ensembl_id', 'mutant_sub_id', 'unknown',
+                                'cigar_string', 'alignment', 'DP_R1', 'DP_R2', 'INT_R1', 
+                                'INT_R2', 'PS_R1', 'PS_R2', 'SP_R1', 'SP_R2')
+
+# filter low reads
+imperfect_counts <- imperfect_counts %>% 
+    filter(DP_R1 >= 3 | DP_R2 >= 3 | INT_R1 >= 3 | INT_R2 >= 3 | PS_R1 >= 3 | PS_R2 >= 3 | SP_R1 >= 3 | SP_R2 >= 3)
+
+# proportion of cells in each bin (relative to pre-sort)
+# DP1S2, DP2S2, INT1S2, INT2S2, PS_R1, PS_R2, SP1S2, SP2S2
+bin_prop <- c( 0.092, 0.091,  0.127, 0.122, 1, 1, 0.596, 0.603)
+
+# multiply each bin count by bin proportion
+imperfect_counts <- bind_cols(select(imperfect_counts, mutant_id:alignment), 
+                 data.frame(mapply(`*`, select(imperfect_counts, DP_R1:SP_R2), bin_prop, SIMPLIFY = FALSE)))
+
+```
+
+```{r splicing_index}
+imperfect_counts <- imperfect_counts %>%
+    mutate(index_R1 = (DP_R1*0 + INT_R1*0.85 + SP_R1*1) / (DP_R1 + INT_R1 + SP_R1),
+           index_R2 = (DP_R2*0 + INT_R2*0.85 + SP_R2*1) / (DP_R2 + INT_R2 + SP_R2))
+
+# replace NaN with NA
+imperfect_counts[imperfect_counts == 'NaN'] <- NA
+```
+
+
+```{r}
+imperfect_fit <- summary(lm(index_R2 ~ index_R1, imperfect_counts))$adj.r.squared 
+ggplot(imperfect_counts, aes(index_R1, index_R2)) + geom_point(alpha = 0.50) +
+    labs(x = 'exon inclusion index replicate 1', y = 'exon inclusion index replicate 2',
+         title = 'Exon inclusion index for imperfect sequences') +
+    annotate('text', label = paste('R^2==', round(imperfect_fit, 2)), parse = T, x = 0.95, y = 0.20)
+```
+
+
+```{r}
+ggplot(imperfect_counts, aes(index_R1)) + geom_histogram(binwidth = 0.05) +
+    labs(x = 'exon inclusion index replicate 1', 
+         title = 'Distribution of imperfect exon inclusion index')
+```
+
+```{r}
+ggplot(imperfect_counts, aes(index_R1)) + geom_density() +
+    labs(x = 'exon inclusion index replicate 1', 
+         title = 'Distribution of imperfect exon inclusion index')
+```
+
+Let's use these imperfect counts to filter the imperfect reference file so we only score mutants that we have enough data for.
+
+```{r}
+imperfect_ref <- read.table('../ref/exac_imperfect_ref_sorted.txt', sep = '\t', header = F, col.names = c('header', 'sequence'))
+imperfect_ref <- imperfect_ref %>% 
+    separate(header, c('mutant_id', 'unknown', 'cigar_string', 'alignment'), sep = ' ')
+imperfect_ref_filtered <- semi_join(imperfect_ref, imperfect_counts, by = 'mutant_id')
+write.table(unite(imperfect_ref_filtered, header, mutant_id, unknown, cigar_string, alignment, sep = ' '),
+            file = '../ref/exac_imperfect_ref_sorted_filtered.txt', sep = '\t', col.names = F, row.names = F, quote = F)
+```
+
+Now let's read in the scored imperfects
+```{r}
+imperfects <- read.table('../../splicemod_update/imperfects_scored_filtered.txt', header = F, sep = '\t',
+                         col.names = c('header', 'sequence', 'mutant_score', 'original_score')) %>% 
+    separate(header, c('mutant_id', 'unknown', 'cigar_string', 'md_tag', 'alignment'), sep = ' ') %>% 
+    separate(mutant_id, c('id', 'mutant_sub_id'), sep = '[.]', remove = F) %>% 
+    separate(alignment, c('NM_tag', 'AM_tag'), sep = '[|]') %>% 
+    mutate(mutant_score = as.numeric(mutant_score),
+           original_score = as.numeric(original_score))
+```
+
+Now let's join the splicing index with the imperfect score information 
+
+```{r join_index}
+imperfects <- left_join(imperfects, select(imperfect_counts, mutant_id, index_R1, index_R2), by = 'mutant_id') %>% 
+    filter(!is.na(index_R1) | !is.na(index_R2)) %>% 
+    mutate(mut_diff = original_score - mutant_score)
+```
+
+```{r}
+ggplot(imperfects, aes(mut_diff)) + geom_histogram(binwidth = 1) +
+    labs(x = 'original reference score - imperfect score')
+```
+
+```{r}
+ggplot(imperfects, aes(x = index_R1, y = mut_diff)) + geom_point() +
+    labs(x = 'exon inclusion index replicate 1', y = 'original reference score - \nimperfect score') +
+    geom_hline(yintercept = 0) +
+    theme(axis.title.y = element_text(angle = 0))
+```
+
+Let's join the imperfect data and the original data and see how their distributions compare.
+
+```{r}
+ggplot(bind_rows(select(data, id, index_R1) %>% mutate(type = 'perfect'),
+                 mutate(imperfect_counts, type = 'imperfect') %>% 
+                     select(id = mutant_id, index_R1, type)), aes(index_R1)) +
+   geom_histogram(binwidth = 0.1, aes(fill = type), position = 'dodge') +
+    scale_fill_manual(values = c('firebrick3', 'steelblue3'), name = '') +
+    labs(x = 'exon inclusion index replicate 1')
+```
+
+```{r}
+# calculate difference in splicing index between imperfect and perfect reference sequence
+imperfects <- left_join(imperfects, select(data, id, index_R1_perfect = index_R1), by = 'id') %>% 
+    mutate(dpsi = index_R1_perfect - index_R1)
+
+ggplot(imperfects, aes(x = dpsi, y = mut_diff)) + geom_point(alpha = 0.50) +
+    labs(x = 'exon inclusion index perfect - \n exon inclusion index imperfect', y = 'original perfect score - \n imperfect score') + 
+    theme(axis.title.y = element_text(angle = 0))
+```
+

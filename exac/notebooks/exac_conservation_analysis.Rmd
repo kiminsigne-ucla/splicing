@@ -1,0 +1,497 @@
+---
+title: "ExAC Conservation Analysis"
+output:
+  html_notebook: default
+  html_document: default
+---
+
+
+```{r setup, echo=F, message=F, warning = F}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(cowplot)
+options(stringsAsFactors = F)
+
+knitr::opts_chunk$set(warning = FALSE, message = F)
+# knitr::opts_chunk$set(tidy.opts = list(width.cutoff = 100), tidy = T)
+
+setwd("~/Documents/projects/splicing/exac/notebooks")
+data <- readRDS('../produced_data/exac_data_clean.rds')
+```
+
+## Genome Conversion ## 
+
+First, we need to liftover the genome coordinates from hg19 to hg 38. The appropriate chain file is needed to convert between hg38 and hg19, which can be retrieved with `wget http://hgdownload.cse.ucsc.edu/goldenPath/hg19/liftOver/hg19ToHg38.over.chain.gz`.
+
+```{r output_bed_liftover}
+# write input BED file for liftOver, format, tab-separated: chrN    start   end
+write.table(data %>% 
+                select(chr, start, end, ensembl_id) %>% 
+                distinct() %>% 
+                na.omit(), 
+            file = '../produced_data/liftover_input_region.bed', 
+            row.names = F, col.names = F, quote = F, sep = '\t')
+
+# write SNP positions, duplicate SNP position so there is a start and end
+write.table(data %>% 
+                mutate(snp_position_end = snp_position + 1) %>% 
+                select(chr, snp_position, snp_position_end, id) %>% 
+                na.omit(),
+            file = '../produced_data/liftover_input_snp.bed', 
+            row.names = F, col.names = F, quote = F, sep = '\t')
+```
+
+The liftOver executable can be downloaded from UCSC at http://hgdownload.soe.ucsc.edu/admin/exe/macOSX.x86_64/liftOver
+
+```{bash liftOver}
+liftOver ../produced_data/liftover_input_region.bed ../../ref/hg19ToHg38.over.chain ../produced_data/converted_region.bed ../produced_data/unlifted_region.bed
+liftOver ../produced_data/liftover_input_snp.bed ../../ref/hg19ToHg38.over.chain ../produced_data/converted_snp.bed ../produced_data/unlifted_snp.bed
+```
+
+Now, let's read in the converted coordinates and join them with our data.
+
+```{r join_converted}
+data <- data %>% 
+    left_join(read.table('../produced_data/converted_region.bed', sep = '\t',
+                         col.names = c('chr', 'start_hg38', 'end_hg38', 'ensembl_id'))  %>%
+                  select(-chr), 
+              by = 'ensembl_id')
+data <- data %>%  
+    left_join(read.table('../produced_data/converted_snp.bed', sep = '\t',
+                         col.names = c('chr', 'snp_position_hg38', 'snp_position_end_hg38', 'id')) %>% 
+                     select(-chr), by = 'id') %>% 
+    # change snp position end so that it is the same as snp position
+    mutate(snp_position_end_hg38 = snp_position_hg38)
+```
+
+
+## Extract conservation scores ##
+
+Now that we have converted all of our coordinates, we will look up the conservation for each SNP position.
+
+```{r write_bed_snp}
+# output bed file of SNP positions 
+write.table(file = '../produced_data/snp_positions.bed', 
+            x = data %>% 
+                select(chr, snp_position_hg38, snp_position_end_hg38, id) %>% 
+                na.omit(), 
+            sep = '\t', col.names = F, row.names = F, quote = F)
+```
+
+Before we can use the phastCons wrapper script (that I wrote), we must first sort the bedfile using `bedtools` (installation instructions: http://bedtools.readthedocs.io/en/latest/content/installation.html)
+
+```{bash bedtools_sort}
+bedtools sort -i ../produced_data/snp_positions.bed > ../produced_data/snp_positions_sorted.bed
+```
+
+Next, we need to download the phastCons files, available in wig format from UCSC. The files can be downloaded with:
+
+```
+wget -r ftp://hgdownload.soe.ucsc.edu/goldenPath/hg38/phastCons100way/hg38.100way.phastCons/
+```
+
+Now, let's call the wrapper script, which will take the sorted bed file as input and output the same bed file, with an additional column for the average conservation score for that position. There is an optional argument for the number of processes to use for parallel processing (default is 3). The script takes ~15 minutes to run (time for one chromosome to run) and was run in parallel on the server and will be imported here in the interest of time.
+
+```
+# usage: python phastCons_wrapper.py <sorted input bed file> <phastCons folder> <output file name> <num processes>
+python ../scripts/phastCons_wrapper.py ../produced_data/snp_positions_sorted.bed ../../ref/phastCons ../produced_data/snp_positions_cons.bed 30
+```
+
+```{r format_cons}
+cons_scores <- read.table('../produced_data/snp_positions_cons.bed', sep = '\t', 
+                          col.names = c('chr', 'start', 'end', 'id', 'mean_cons_score'))
+
+# convert NaN to NA
+cons_scores[is.na(cons_scores)] <- NA
+
+# some sequences have two variants at the same position. These duplicate positions will have no score because
+# we had already iterated through that position. Find these duplicate entries and give them the same conservation
+# score as the original entry
+cons_scores <- cons_scores %>%
+    # combine together to find duplicates
+    mutate(position = paste0(chr, start)) %>% 
+    # get the duplicates which will always have NA score
+    filter(duplicated(position)) %>% 
+    # get the duplicates from the original dataframe, but get the original entry that has the score by 
+    # using distinct and joining with duplicates with no score
+    left_join(mutate(cons_scores, position = paste0(chr, start)) %>% 
+                  select(position, mean_cons_score) %>% 
+                  distinct(), 
+              by = 'position') %>% 
+    select(-position, -mean_cons_score.x, mean_cons_score = mean_cons_score.y) %>% 
+    na.omit() %>% 
+    # combine with original dataframe with duplicates removed
+    bind_rows(mutate(cons_scores, position = paste0(chr, start)) %>% 
+                  filter(!duplicated(position)) %>% 
+                  select(-position))
+    
+data <- left_join(data, select(cons_scores, id, mean_cons_score), by = 'id')
+```
+
+
+```{r cons_dist_viz}
+ggplot(data, aes(mean_cons_score)) + geom_histogram(binwidth = 0.05) +
+    labs(x = 'SNP position phastCons 100-way conservation score', 
+         y = 'frequency',
+         title = 'Distribution of conservation scores')
+```
+
+We now have the conservation score at each SNP position in our library. In order to get a better sense of conservation at each position, we should get a relative position for each mutation and scale it to the range (0, 1) so we can compare mutation positions to each other on the same scale. We will use the intron/exon boundary for each relative position. For SNPs in the exon, we will use whichever intron is closer to the SNP to quantify relative position.
+
+```{r relative_scaled_position, echo = F}
+in_interval <- function(start, end, x) {
+    if (start <= x & x <= end) { return(TRUE) }
+    else {return(FALSE)}
+}
+    
+scaled_position <- function(intron1_len, exon_len, intron2_len, strand, rel_pos_start) {
+    if (strand == '-') {
+        # set appropriate lengths
+        upstr_intron_len <- intron2_len
+        downstr_intron_len <- intron1_len
+        # position relative to start of region, count from end of region if negative strand
+        rel_pos_start <- (intron1_len + exon_len + intron2_len) - rel_pos_start + 1
+    }
+    else{
+        upstr_intron_len <- intron1_len
+        downstr_intron_len <- intron2_len
+    }
+    
+    regions <- data.frame(label = c('upstr_intron', 'exon', 'downstr_intron'),
+                          start = c(1, upstr_intron_len + 1, upstr_intron_len + exon_len + 1),
+                          end = c(upstr_intron_len, upstr_intron_len + exon_len, 
+                                  upstr_intron_len + exon_len + downstr_intron_len))
+    # select region the SNP falls in
+    label <- regions %>% 
+        rowwise() %>% 
+        filter(in_interval(start, end, x = rel_pos_start))
+    
+    start <- label$start[1]
+    end <- label$end[1]
+    label <- label$label[1]
+    
+    # get position relative to intron/exon boundary, scale relative to feature length
+    if (label == 'upstr_intron') {
+        # distance from right side of intron
+        rel_pos <- end - rel_pos_start + 1
+        rel_pos_scaled <- rel_pos / upstr_intron_len
+    }
+    if (label == 'downstr_intron') {
+        # distance from left side of intron
+        rel_pos <- rel_pos_start - start + 1
+        rel_pos_scaled <- rel_pos / downstr_intron_len
+    }
+    if (label == 'exon') {
+        # quantify from either intron boundary, left or right, so just take the minimum scaled position
+        rel_pos <- min(rel_pos_start - start + 1, end - rel_pos_start + 1)
+        rel_pos_scaled <- rel_pos / exon_len
+    }
+    # easier to return as string, parse output
+    return(paste(label, rel_pos_scaled, sep = ':'))
+}
+```
+
+Let's try another way of calculating position. We will calculate everything relative to the upstream intron/exon boundary.
+Negative positions correspond to upstream variants, 0 to the upstream intron/exon boundary, positions 0-1 to exon variants,
+and positions greater than 1 to downstream intron variants.
+
+```{r relative_position}
+rel_position <- function(intron1_len, exon_len, intron2_len, strand, rel_pos_start) {
+    if (strand == '-') {
+    # set appropriate lengths
+        upstr_intron_len <- intron2_len
+        downstr_intron_len <- intron1_len
+        # position relative to start of region, count from end of region if negative strand
+        rel_pos_start <- (intron1_len + exon_len + intron2_len) - rel_pos_start + 1
+    }
+    else{
+        upstr_intron_len <- intron1_len
+        downstr_intron_len <- intron2_len
+    }
+    
+    regions <- data.frame(label = c('upstr_intron', 'exon', 'downstr_intron'),
+                          start = c(1, upstr_intron_len + 1, upstr_intron_len + exon_len + 1),
+                          end = c(upstr_intron_len, upstr_intron_len + exon_len, 
+                                  upstr_intron_len + exon_len + downstr_intron_len))
+    # select region the SNP falls in
+    label <- regions %>% 
+        rowwise() %>% 
+        filter(in_interval(start, end, x = rel_pos_start))
+    
+    start <- label$start[1]
+    end <- label$end[1]
+    label <- label$label[1]
+    
+    # get distance from end of upstream intron/exon boundary
+    boundary <- upstr_intron_len
+    distance <- rel_pos_start - boundary
+    
+    # normalize to feature length
+    if (label == 'downstr_intron') {
+        scaled_distance <- 1 + (distance - exon_len) / (end - start)
+    }
+    else {
+        scaled_distance <- distance / (end - start + 1)
+    }
+    
+    # additionally, find distance from respective intron/exon boundary
+    # left side of boundary is negative, right side is positive
+    if (label == 'upstr_intron') {
+        rel_pos_feature <- rel_pos_start - end - 1
+    }
+    if (label == 'exon') {
+        # closer to downstream intron
+        if ( rel_pos_start - start + 1 >= end - rel_pos_start + 1) {
+            rel_pos_feature <- rel_pos_start - end - 1 # negative position, left side of boundary
+        }
+        else {
+            # closer to upstream intron, right side of boundary, positive
+            rel_pos_feature <- rel_pos_start - start + 1
+        }
+    }
+    if (label == 'downstr_intron') {
+        rel_pos_feature <- rel_pos_start - start + 1
+    }
+    return(paste(label, rel_pos_feature, scaled_distance, sep = ':'))
+}
+
+data <- data %>% 
+    select(intron1_len, exon_len, intron2_len, strand, rel_position, id) %>%
+    na.omit() %>%
+    rowwise() %>%
+    mutate(rel_position_info = rel_position(intron1_len, exon_len, intron2_len, strand, rel_position)) %>%
+    separate(rel_position_info, c('label', 'rel_position_feature', 'rel_position_scaled'), sep = ':', convert = T) %>%
+    select(id, label, rel_position_feature, rel_position_scaled) %>%
+    left_join(data, ., by = 'id')
+```
+
+Let's do a quick check. The two bases of the intron adjacent to the exon should be highly conserved.
+
+```{r intron_check_viz}
+tmp <- filter(data, label == 'upstr_intron' | label == 'downstr_intron', abs(rel_position_feature) == 2)
+ggplot(filter(data, label == 'upstr_intron' | label == 'downstr_intron', abs(rel_position_feature) == 2),
+       aes(mean_cons_score)) +
+    geom_histogram() +
+    labs(x = 'conservation score at SNP position', 
+         title = 'Distribution of conservation scores at SNPs\n two bases into the intron')
+```
+
+Now that we have relative position information, let's see what the conservation distribution looks like according to relative position.
+
+```{r position_vs_cons_viz}
+ggplot(data, aes(rel_position_scaled, mean_cons_score)) + 
+    geom_point(alpha = 0.75, aes(color = label)) +
+    labs(x = 'relative scaled position', 
+         y = 'variant conservation score')
+
+ggplot(data %>%
+           mutate(rel_pos_binned = cut(rel_position_scaled, breaks = seq(-.80, 1.80, 0.10))) %>% 
+           filter(!is.na(rel_pos_binned)),
+    aes(x = rel_pos_binned, y = mean_cons_score)) +
+    geom_boxplot(aes(color = label)) +
+    labs(x = 'relative scaled position',
+         y = 'variant conservation') +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+The variants that lie closer to the intron/exon boundaries tend to be more conserved.
+
+Let's look at the relationship between dPSI and conservation.
+```{r}
+ggplot(data, aes(dpsi_R1, mean_cons_score)) + 
+    geom_point() +
+    labs(x = 'dPSI', y = 'variant conservation score')
+
+ggplot(data %>% 
+           mutate(index_binned = cut(dpsi_R1, breaks = seq(-1, 0, 0.1))) %>% 
+           filter(!is.na(index_binned)),
+       aes(index_binned, mean_cons_score)) +
+    geom_boxplot() +
+    labs(x = 'dPSI', y = 'variant conservation score') +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+Variants that cause a large change in dPSI (> =.80) tend to be highly conserved, while those that cause little to no change (>= 0.10) tend to not be conserved.
+
+
+## ExAC Annotation ##
+
+```{r write_tabix_input}
+# write file of regions of SNPs for input to tabix
+write.table(data %>%
+                mutate(chr = gsub('chr', '', chr),
+                       snp_region = paste0(chr, ':', snp_position, '-', snp_position + 1)) %>%
+                select(snp_region) ,
+            file = '../produced_data/tabix_input_snp_regions.txt',
+            quote = F, row.names = F, col.names = F, sep = '\t')
+```
+
+We can extract the ExAC annotation from the large VCF file using tabix. The necessary `.tbi` file, `ExAC.r0.3.1.sites.vep.vcf.gz.tbi` must be created first (`tabix ../ref/ExAC.r0.3.1.sites.vep.vcf.gz`). In the below command, the file is read in and `tabix` is executed for each region, one per line, in the input text file and the result appended to the file. The below command takes awhile to run, so it is not evaluated automatically in the script.
+
+```{bash get_exac_annot, eval = F}
+while read line; do
+    tabix ../ref/ExAC.r0.3.1.sites.vep.vcf.gz $line >> ../ref/snp_exac_annot.txt
+done < ../produced_data/tabix_input_snp_regions.txt
+```
+
+Now, let's read in the ExAC annotation for our SNPs.
+
+```{r parse_exac}
+exac_annot <- read.table('../ref/snp_exac_annot.txt', sep = '\t', header = F)
+colnames(exac_annot) <- c('chr', 'position', 'snp_id', 'ref_allele', 'alt_allele', 'quality', 'filter', 'info')
+# get info column names
+# split by ';', separates info columns
+example_info <- unlist(strsplit(exac_annot$info[1], split = ';'))
+# get names only, e.g. key=value
+info_names <- unlist(lapply(strsplit(example_info, split = '='), `[[`, 1))
+exac_annot <- separate(exac_annot, info, into = info_names, sep = ';') %>%
+    # from info fields, only save CSQ, only one we care about right now
+    select(chr:filter, CSQ)
+
+# parse CSQ column, consequence annotations from Ensembl VEP (Variant Effect Predictor). Description of fields taken from header of vcf file
+csq_fields <- 'Allele|Consequence|IMPACT|SYMBOL|Gene|Feature_type|Feature|BIOTYPE|EXON|INTRON|HGVSc|HGVSp|cDNA_position|CDS_position|Protein_position|Amino_acids|Codons|Existing_variation|ALLELE_NUM|DISTANCE|STRAND|VARIANT_CLASS|MINIMISED|SYMBOL_SOURCE|HGNC_ID|CANONICAL|TSL|CCDS|ENSP|SWISSPROT|TREMBL|UNIPARC|SIFT|PolyPhen|DOMAINS|HGVS_OFFSET|GMAF|AFR_MAF|AMR_MAF|ASN_MAF|EAS_MAF|EUR_MAF|SAS_MAF|AA_MAF|EA_MAF|CLIN_SIG|SOMATIC|PHENO|PUBMED|MOTIF_NAME|MOTIF_POS|HIGH_INF_POS|MOTIF_SCORE_CHANGE|LoF_info|LoF_flags|LoF_filter|LoF|context|ancestral'
+csq_fields <- unlist(strsplit(csq_fields, split = '[|]'))
+exac_annot <- separate(exac_annot, CSQ, into = csq_fields, sep = '[|]') %>%
+    mutate(Allele = gsub('CSQ=', '', Allele))
+
+exac_annot <- exac_annot %>%
+    mutate(annot = strsplit(Consequence, '&')) %>%
+    unnest(annot) %>%
+    select(chr:Allele, -Consequence, annot, IMPACT:ancestral) %>%
+    distinct()
+```
+
+
+```{r join_exac}
+# join exac data
+data <- data %>%
+        mutate(chr = as.numeric(gsub('chr', '', chr))) %>% 
+        left_join(select(exac_annot, chr, position, annot),
+                 by = c('chr', 'snp_position' = 'position'))
+
+# for each annotation category, calculate the average conservation score
+data <- data %>%
+    group_by(annot) %>%
+    mutate(annot_cons_mean = mean(mean_cons_score, na.rm = T),
+           # normalize to annotation category mean
+           rel_mean_cons_score = ifelse(!is.na(annot), mean_cons_score / annot_cons_mean, NA)) %>%
+    ungroup()
+```
+
+```{r annot_boxplot_viz, fig.height=8, fig.width = 14}
+ggplot(data, aes(annot, mean_cons_score)) +
+    geom_boxplot(aes(color = annot)) +
+    labs(y = 'variant conservation score',
+         x = 'annotation category') +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r annot_bin}
+ggplot(select(data, annot, annot_cons_mean) %>% distinct() %>% arrange(annot_cons_mean), aes(annot, annot_cons_mean)) + 
+    geom_bar(stat = 'identity', aes(fill = annot)) + scale_fill_discrete(name = 'annotation category') +
+    labs(x = '', y = 'mean conservation') +
+    theme(axis.text.x = element_blank())
+```
+
+We can see that splice acceptor/donor variants are the most highly conserved categories, along with missense variants, which is what we'd expect. Intron variants are the one of the least conserved categories, which is also what we would expect.
+
+
+## High Confidence Calls ##
+
+Let's look at the list of high confidence calls and see where they fall in the conservation distribution.
+
+```{r high_conf_dist_viz}
+ggplot(filter(data, category != 'control'), aes(mean_cons_score)) + 
+    geom_density(aes(color = high_confidence)) + theme(legend.position = 'top') +
+    scale_color_manual(values = c('black', 'red')) +
+    labs(x = 'Average conservation score', 
+         color = 'high confidence') 
+```
+
+```{r high_conf_boxplot_viz}
+ggplot(data, aes(x = high_confidence, y = mean_cons_score)) + 
+    geom_boxplot(aes(color = high_confidence)) +
+    labs(x = 'high confidence', y = 'Average relative\n conservation score') +
+    scale_color_manual(values = c('black', 'red')) +
+    theme(legend.position = 'top')
+```
+
+```{r ttest_high_conf}
+t.test(filter(data, high_confidence == TRUE)$mean_cons_score, 
+       filter(data, high_confidence == FALSE)$mean_cons_score)
+```
+ We can see that the conservation distribution for high confidence calls is skewed towards highly conserved positions. The boxplot further highlights the difference in conservation distribution for high confidence calls. The 95% confidence interval for the true difference in means does not include 0 and the p-value is much smaller than 0.05, indicating that the high confidence calls are on average more conserved than non-high confidence calls.
+
+```{r high_conf_rel_pos_viz}
+ggplot(data, aes(rel_position_scaled, mean_cons_score)) + 
+    geom_point(alpha = 0.75, aes(color = high_confidence)) +
+    scale_color_manual(values = c('black', 'red'), name = 'high confidence') +
+    labs(x = 'relative scaled position to intron/exon boundary', 
+         y = 'relative conservation score', 
+         title = 'Distribution of relative conservation scores by position')
+```
+
+```{r save_data, echo = F}
+saveRDS(data, '../produced_data/exac_data_cons_scores.rds', compress = T)
+```
+
+
+## Top Variants ##
+
+```{r top_terms}
+# read in mapping between ensembl exon IDs and gene IDs, 2011 release 63, hg19
+mapping <- read.table(file = '../produced_data/ensembl_exon_gene_id_mapping.txt', 
+                      col.names = c('ensembl_gene_id', 'ensembl_transcript_id', 'ensembl_exon_id'))
+
+data <- data %>% 
+    left_join(select(mapping, ensembl_gene_id, ensembl_id = ensembl_exon_id), by = 'ensembl_id')
+
+# grab the closest release from biomaRt, release 67, and corresponding RefSeq IDs
+mart <- biomaRt::useMart('ENSEMBL_MART_ENSEMBL', dataset = 'hsapiens_gene_ensembl',
+                host = "may2012.archive.ensembl.org")
+
+GO_terms <- biomaRt::getBM(mart = mart, 
+                         attributes = c('ensembl_gene_id', 'external_gene_id', 'go_id', 
+                                        'name_1006', 'definition_1006'), 
+                         filters = c('ensembl_gene_id'),
+                         values = data$ensembl_gene_id)
+
+top <- data %>% 
+    filter(high_confidence == TRUE) %>% 
+    arrange(desc(mean_cons_score)) %>% 
+    slice(1:20) %>% 
+    left_join(select(GO_terms, ensembl_gene_id, external_gene_id) %>% distinct(), by = 'ensembl_gene_id')
+
+top %>% 
+    select(mean_cons_score, annot, external_gene_id)
+```
+
+- RAB40C - member RAS oncogene family
+- RBL2 - RB transcriptional corepressor like 2. Diseases associated include retinoblastoma and retinal cancer. Among related pathways are cell cycle and adipogenesis
+- SLC28A2 - solute carrier family 28 member 2, nucleoside binding, purine nucleoside transmembrane transporter activity.
+- USH1C - scaffold protein that functions in the assembly of Usher protein complexes. Defects in this gene are the cause of Usher syndrome type 1C and non-syndromic sensorineural deafness recessive type 18
+- MLF2 - myeloid leukemia factor 2, diseases associated include myeloid leukemia and leukemia. 
+
+Now, let's filter by relative conservation (conservation / annotation category mean) and see what the top genes are.
+
+```{r top_terms_relative}
+top_relative <- data %>% 
+    filter(high_confidence == TRUE) %>% 
+    arrange(desc(rel_mean_cons_score)) %>% 
+    slice(1:20) %>% 
+    left_join(select(GO_terms, ensembl_gene_id, external_gene_id) %>% distinct(), by = 'ensembl_gene_id')
+
+top_relative %>% 
+    select(rel_mean_cons_score, annot, external_gene_id)
+```
+
+May not be best to rank by relative conservation, the top 20 variants are all intron variants, most likely because the average conservation for intron variants is low, resulting in the relative conservation to be higher.
+
+RBL2 is second when variants are sorted by mean conservation score and first when sorted by relative conservation score. 
+
+- CA6 - one of several isozymes of carbonic anhydrase. Found only in salivary glands and saliva
+- TRPM1 - encodes member of transient receptor potential melastatin subfamily of transient receptor potential ion channels. Protein is a calium permeable cation channel that is expressed in melanocytes and may play a role in melanin synthesis. Specific mutations in this gene cause autosomal recessive complete congenital stationary night blindness-1C. Expression of this protein is inversely correlated with melanoma agressiveness and isu sed as a prognostic marker for melanoma metastasis.
+- KRT84 - member of keratin gene family
+- TK2 - thymidine kinase 2, mitochondrial. Encodes a deoxyribonucleoside kinase that specifically phosphorylates thymidine, deoxycytidine, and deoxyuridine. Localizes to mitochondria, required for mitochondrial DNA synthesis. Mutations in this gene are associated with a myopathic form of mitochondrial DNA depletion syndrome. Alternate splcing results in multiple transcript variants encoding distinct isoforms, some of which lack transit peptide, so are not localized to mitochondria.
+
+

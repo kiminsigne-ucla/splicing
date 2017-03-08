@@ -1,0 +1,239 @@
+---
+title: "Exon Expression Analysis"
+output:
+  html_document: default
+  html_notebook: default
+---
+
+We plan to validate certain SNP mutations with CRISPRi. Ideally we would like to test exons that have high expression in HEK293T cells so the assay will be more sensitive to changes in expression due to mutations. In this notebook I will integration expression information with the exons in our library.
+
+I will use RNA-seq data from [this study](http://www.cell.com/molecular-cell/abstract/S1097-2765(14)00129-4) in Cell from 2014 that studied the effect of microRNA targeting in different cellular contexts. They performed RNA-seq after different miRNA transfections in different cell lines, including a pUC19 mock transfection control in HEK293 cells (two replicates), which we will use here. 
+
+The accession codes are [GSM1269354](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSM1269354), [GSM1269355](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSM1269355). The processed RNA-seq files can be retrieved with:
+
+```
+wget ftp://ftp.ncbi.nlm.nih.gov/geo/series/GSE52nnn/GSE52530/suppl/GSE52530_HEK293.expData.qn.txt.gz
+```
+
+A description of the data processing can be found on the accession pages. Copied from there: 
+
+- Basecalls performed using CASAVA version 1.7
+- All RNA-seq data were mapped to the human reference genome (hg19) using Bowtie version 0.12.8 (Trapnell et al., 2009), allowing at most five genomic matches but choosing the best one (-n 1 -e 240 -m 5 --best --strata).
+- To measure expression level, we estimated both reads per kilobases per million reads (RPKM) values and reads per million reads (RPM) values based on RefSeq annotation (Aug-22-2011 version).
+- Quantile normalization (qn) was performed to reduce technical global bias of expressions between replicates and between wild type and transfected cells.
+Genome_build: hg19
+
+Let's load in the data and keep the columns we care about.
+```{r setup, echo=F, message=F, warning=F, include=F}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(cowplot)
+options(stringsAsFactors = F)
+options(scipen = 10000)
+
+knitr::opts_chunk$set(warning = FALSE, message = F)
+knitr::opts_chunk$set(tidy.opts = list(width.cutoff = 80), tidy = T)
+
+setwd("~/Documents/projects/splicing/exac/notebooks")
+```
+
+```{r read_files}
+# three samples, two replicate each
+exp <- read.table('../../ref/HEK293_expression/GSE52530_HEK293.expData.qn.txt', sep = '\t',
+                  header = F, col.names = c('refseq_gene_id', 'gene_length',
+                                            'puc19', 'miR_124', 'miR_155')) %>%
+    # drop miRNA columns, only interested in the puc19 control
+    select(-miR_124, -miR_155) %>%
+    # replicates for each sample are stored in one field, comma-separated. Separate these columns out
+    separate(puc19, c('hek293_exp_1', 'hek293_exp_2'), sep = ',', convert = T) %>% 
+    # convert to numeric
+    mutate(hek293_exp_1 = as.numeric(hek293_exp_1),
+           hek293_exp_2 = as.numeric(hek293_exp_2))
+
+# read in data
+data <- readRDS('../produced_data/exac_data_cons_scores.rds')
+
+# read in mapping between ensembl exon IDs and gene IDs, 2011 release 63, hg19
+mapping <- read.table(file = '../produced_data/ensembl_exon_gene_id_mapping.txt', 
+                      col.names = c('ensembl_gene_id', 'ensembl_transcript_id', 'ensembl_exon_id'))
+```
+
+Quick check of replicate quality.
+```{r rep_qc_viz}
+summary(lm(hek293_exp_2 ~ hek293_exp_1, exp))
+ggplot(exp, aes(hek293_exp_1, hek293_exp_2)) + geom_point(alpha = 0.25) +
+    scale_x_log10() + scale_y_log10() + annotation_logticks(sides = 'bl') +
+    labs(x = 'HEK293 expression replicate 1', y = 'HEK293 expression replicate 2')
+```
+
+Let's get a mapping between Ensembl exon IDs and RefSeq IDs so we can integrate the expression data. We have the mapping between Ensembl gene IDs, transcript IDs and exon IDs for the 2011 release from the Ensembl SQL database. We can use `biomaRt` to get the mapping between the Ensembl information and RefSeq mRNA. We will use the transcript IDs since the RefSeq mRNA levels refer to the transcript level rather than the exon level.
+
+```{r map_refseq}
+# grab the closest release from biomaRt, release 67, and corresponding RefSeq IDs
+mart <- biomaRt::useMart('ENSEMBL_MART_ENSEMBL', dataset = 'hsapiens_gene_ensembl',
+                host = "may2012.archive.ensembl.org")
+current_mapping <- biomaRt::getBM(mart = mart, 
+                         attributes = c('ensembl_gene_id', 'ensembl_exon_id', 'ensembl_transcript_id',
+                                        'refseq_mrna'), 
+                         filters = c('ensembl_gene_id'),
+                         values = mapping$ensembl_gene_id)
+
+mapping <- left_join(mapping, current_mapping, 
+                 by = c('ensembl_gene_id', 'ensembl_transcript_id','ensembl_exon_id'))
+```
+
+In order to quantify the level of exon expression, we will look at the transcript level instead since this is a more aggregate measure. How many transcripts can exons be part of?
+
+```{r transcript_dist_viz}
+ggplot(mapping %>% 
+           group_by(ensembl_exon_id) %>% 
+           summarise(num_transcripts = n()),
+       aes(num_transcripts)) + 
+    geom_histogram(binwidth = 1) +
+    labs(x = 'Number of transcripts containing the same exon', 
+         title = 'Distribution of transcripts per exon')
+```
+
+There are a lot of exons that are contained in multiple transcripts. For now, let's use the expression of the longest transcript as a proxy for exon expression.
+
+```{r quantify_exp}
+# add length information from expression data, create 1-to-1 mapping between exons and 
+# transcripts by assigning longest transcript to represent the exon
+mapping_oneToOne <- mapping %>% 
+    left_join(select(exp, refseq_mrna = refseq_gene_id, gene_length)) %>% 
+    group_by(ensembl_exon_id) %>% 
+    mutate(longest_transcript = ifelse(which.max(gene_length) != 0, 
+                                       ensembl_transcript_id[which.max(gene_length)],
+                                       NA)) %>% 
+    filter(ensembl_transcript_id == longest_transcript) %>% 
+    select(-longest_transcript, -gene_length) %>% 
+    ungroup()
+
+# add expression to data
+data <- data %>% 
+    left_join(mapping_oneToOne, by = c('ensembl_id' = 'ensembl_exon_id')) %>% 
+    left_join(rename(exp, refseq_mrna = refseq_gene_id), by = 'refseq_mrna') %>% 
+    arrange(ensembl_id, sub_id)
+
+# get average expression between both replicates
+data$nat_hek293_exp <- rowMeans(select(data, hek293_exp_1, hek293_exp_2))
+```
+
+For all graphs below showing expression, only the natural sequences are included. 
+
+```{r exp_viz}
+ggplot(filter(data, category == 'natural'), aes(nat_hek293_exp)) + geom_histogram() + 
+    scale_x_log10() + annotation_logticks(sides = 'b') +
+    labs(x = 'RNA expression of longest transcript of exon')
+```
+
+Note: During pre-processing, we only kept natural sequences that behaved as expected i.e had a high splicing index, so the splicing index range will be high and narrow.
+
+```{r index_vs_exp_viz}
+ggplot(filter(data, category == 'natural'), aes(index_R1, nat_hek293_exp)) + geom_point(alpha = 0.25) +
+    scale_y_log10() + annotation_logticks(sides = 'l') +
+    labs(x = 'exon inclusion index replicate 1', 
+         y = 'HEK293 expression',
+         title = 'Natural sequences') 
+```
+
+Let's bin by splicing index to get a better sense of the splicing index vs. expression
+
+```{r index_exp_bin_viz}
+ggplot(data %>% 
+           filter(category == 'natural') %>% 
+           mutate(index_bin = cut(index_R1, breaks = seq(0, 1, 0.1)),
+                  nat_hek293_exp = ifelse(is.na(nat_hek293_exp), 0, nat_hek293_exp)) %>% 
+           group_by(index_bin) %>% 
+           summarise(index_bin_median_exp = median(nat_hek293_exp)) %>% 
+           na.omit(), 
+       aes(x = index_bin, y = index_bin_median_exp)) + 
+    geom_bar(stat = 'identity') +
+    labs(x = 'exon inclusion index replicate 1, binned',
+         y = 'Median HEK293 expression\n per binned index') +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r exp_boxplot_viz}
+ggplot(data %>% 
+           filter(category == 'natural') %>% 
+           mutate(index_bin = cut(index_R1, breaks = seq(0, 1, 0.1)),
+                  nat_hek293_exp = ifelse(is.na(nat_hek293_exp), 0, nat_hek293_exp)) %>% 
+           filter(!is.na(index_bin)), 
+       aes(x = index_bin, y = nat_hek293_exp)) + 
+    geom_boxplot() + scale_y_log10() + annotation_logticks(sides = 'l') +
+    labs(x = 'Splicing inclusion index replicate 1, binned',
+         y = 'HEK293 expression') +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+Let's get a list of the top 100 expressed exons/transcripts.
+
+```{r top_expressed}
+top_expressed <- data %>% 
+    filter(category == 'natural') %>% 
+    select(ensembl_id, index_R1, nat_hek293_exp) %>% 
+    na.omit() %>% 
+    distinct() %>% 
+    arrange(desc(nat_hek293_exp)) %>% 
+    top_n(n = 100)
+top_expressed
+```
+
+```{r top_exp_viz}
+ggplot(top_expressed, aes(index_R1, nat_hek293_exp)) + geom_point(alpha = 0.25) +
+    labs(x = 'exon inclusion index replicate 1', 
+         y = 'Average HEK293 expression',
+         title = 'Top 100 expressed exons')
+```
+
+```{r index_vs_exp_top_viz}
+ggplot(left_join(data, 
+                 mutate(top_expressed, top_100 = 'TRUE') %>% select(ensembl_id, top_100),
+                 by = 'ensembl_id') %>% 
+         mutate(top_100 = ifelse(is.na(top_100), 'FALSE', 'TRUE')), aes(x = index_R1, y = nat_hek293_exp)) + 
+    geom_point(alpha = 0.50, aes(color = top_100)) + scale_color_manual(values = c('black', 'blue'), name = 'top 100') +
+    scale_y_log10() + annotation_logticks(sides = 'l') + 
+    theme(legend.position = 'top') + 
+    labs(x = 'exon inclusion index replicate 1', 
+         y = 'Average HEK293 expression\n of natural sequence') 
+    
+```
+
+Let's look at the function of the top expressed exons using the Ensembl Gene IDs.
+
+```{r go_terms}
+GO_terms <- biomaRt::getBM(mart = mart, 
+                         attributes = c('ensembl_gene_id', 'external_gene_id', 'go_id', 'name_1006', 'definition_1006'), 
+                         filters = c('ensembl_gene_id'),
+                         values = data$ensembl_gene_id) %>% 
+            left_join(select(data, ensembl_gene_id, nat_hek293_exp), by = 'ensembl_gene_id')
+
+arrange(GO_terms, desc(nat_hek293_exp)) %>% 
+    select(external_gene_id) %>% 
+    distinct() %>% 
+    slice(1:10)
+```
+
+Let's get a list of the top n mutants with the highest expression of natural sequence and dPSI >= 0.90 (high confidence calls). These mutants would be of interest for validation with CRISPRi assays.
+
+```{r top_mutants}
+top_n <- 20
+top_mutants <- data %>% 
+    arrange(desc(nat_hek293_exp)) %>% 
+    filter(high_confidence == T, category == 'mutant') %>% 
+    slice(1:top_n) %>% 
+    select(id, ensembl_gene_id, chr, start, end, strand, snp_position, sequence, dpsi_R1, dpsi_R2, 
+           mean_cons_score, label, annot, refseq_mrna, nat_hek293_exp)
+
+top_mutants
+
+write.table(top_mutants, file = '../produced_data/top_variants_for_crispri.txt', sep = '\t',
+            row.names = F, quote = F)
+```
+
+```{r save_data}
+saveRDS(data, file = '../produced_data/exac_data_cons_exp.rds', compress = T)
+```
+

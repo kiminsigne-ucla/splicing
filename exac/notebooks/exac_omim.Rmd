@@ -1,0 +1,54 @@
+---
+title: "ExAC OMIM Analysis"
+output: html_notebook
+---
+
+The OMIM database (Online Mendelian Inheritance in Man) is a comprehensive collection of human genes and genetic phenotypes, containing information on all known Mendelian disorders and over 15,000 genes. Mendelian disorders are those that can be caused by a mutation in a single gene (e.g. sickle-cell anemia, Tay-Sachs disease, cystic fibrosis).
+
+To download OMIM files, request access for files at https://omim.org/downloads/. The URLs will be emailed to you.
+
+```
+# A tab-delimited file linking MIM numbers with NCBI Gene IDs, Ensembl Gene IDs, and HGNC Approved Gene Symbols.
+wget https://omim.org/static/omim/data/mim2gene.txt
+# A tab-delimited file of MIM numbers and titles.
+wget https://data.omim.org/downloads/KXa_EBdmQjSkLPLXrB0ajA/mimTitles.txt
+# A tab-delimited file containing OMIM's Synopsis of the Human Gene Map. This includes the morbid map information sorted by chromosome location.
+wget https://data.omim.org/downloads/KXa_EBdmQjSkLPLXrB0ajA/genemap.txt
+# A tab-delimited file of OMIM's Synopsis of the Human Gene Map (same as genemap.txt above) sorted alphabetically by disorder.
+wget https://data.omim.org/downloads/KXa_EBdmQjSkLPLXrB0ajA/morbidmap.txt
+# A tab-delimited file containing OMIM's Synopsis of the Human Gene Map including additional information such as genomic coordinates and inheritance.
+wget https://data.omim.org/downloads/KXa_EBdmQjSkLPLXrB0ajA/genemap2.txt
+```
+
+Let's read in the gene map that includes genomic coordinates.
+
+```{r setup, echo = F}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(cowplot)
+options(stringsAsFactors = F)
+
+knitr::opts_chunk$set(warning = FALSE, message = F)
+setwd("~/Documents/projects/splicing/exac/notebooks")
+```
+
+```{r}
+omim_gene_map <- read.table('../../ref/OMIM/genemap2.txt', 
+                            # header is contained in last comment line
+                            comment.char = '', 
+                            # skip first three lines of comments
+                            skip = 3,
+                            header = T, sep = '\t', fill = T, check.names = F) %>% 
+    rename(Chromosome = `# Chromosome`)
+
+mim_titles <- read.table('../../ref/OMIM/mimTitles.txt', comment.char = '', skip = 2,
+                         header = T, sep = '\t', fill = T, check.names = F)
+
+morbid_map <- read.table('../../ref/OMIM/morbidmap.txt', comment.char = '', skip = 3, 
+                         header = T, sep = '\t', fill = T, check.names = F) %>% 
+    rename(Phenotype = `# Phenotype`)
+
+```
+
+

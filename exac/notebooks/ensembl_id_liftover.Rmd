@@ -1,0 +1,174 @@
+---
+title: "Ensembl ID liftover"
+output: html_notebook
+---
+
+```{r, echo=F, message=F, warning=F}
+library(dplyr)
+library(tidyr)
+library(biomaRt)
+library(rtracklayer)
+library(GenomicRanges)
+library(IRanges)
+options(stringsAsFactors = F)
+
+knitr::opts_chunk$set(warning = FALSE, message = F)
+setwd("~/Documents/projects/splicing/exac/notebooks")
+```
+
+
+In order to any further analysis, we must first liftover the 2011 Ensembl exon IDs to the current version. The old version is Ensembl release 63, which is not archived in `biomaRt`. The SQL files for the release are available online and can be retrieved with the following commands:
+
+```
+mkdir -p /path/to/ensembl_db_dir/core
+mkdir -p /path/to/ensembl_db_dir/variation
+cd /path/to/ensembl_db_dir/core
+# takes ~ 20m
+wget -r ftp://ftp.ensembl.org/pub/release-63/mysql/homo_sapiens_core_63_37/
+cd /path/to/ensembl_db_dir/variation
+# 23G of files, ~2.5 hours
+wget -r ftp://ftp.ensembl.org/pub/release-63/mysql/homo_sapiens_variation_63_37/
+gunzip *.gz
+```
+
+To create the DB, first install MySQL, and then open the console.
+
+```
+# create empty database
+create database homo_sapiens_core_63_37;
+# create user 'ensembl' with password 'ensembl' with full access to database
+create user 'ensembl'@'localhost' identified by 'ensembl';
+grant all privileges on homo_sapiens_core_63_37 . * to 'ensembl'@'localhost';
+flush privileges;
+```
+
+The schema contains zero dates, which strict mode (the default) does not allow. I tried editing the `my.cnf` file to change the modes, but kept getting errors when trying to start the server. For simplicity, I will just set the mode at runtime and load the schema in the `.sql` file in the console.
+
+```
+set sql_mode='ALLOW_INVALID_DATES';
+use homo_sapiens_core_63_37;
+source ./homo_sapiens_core_63_37;
+```
+
+Now that we have created the empty schema, we can import the text files. This will take awhile, so run it in the background.
+```
+mysqlimport -u ensembl -pensembl --fields_escaped_by=\\ homo_sapiens_core_63_37 -L *.txt &
+```
+
+First, let's import our table of ID information to convert into a table in SQL. 
+
+```
+create table splicemod_ids (id char(15), chr int, start int, end int, strand char(2));
+
+load data local infile '~/Documents/projects/splicing/exac/produced_data/id_info.csv' 
+into table splicemod_ids
+fields terminated by ',' 
+ignore 1 lines;
+```
+
+Now, I will use SQL to get a mapping between exon IDs and gene IDs. I will roughly outline the logic behind the following SQL commands necessary to get this mapping. 
+
+```
+exon_stable_id: stable_id (e.g. ENSE00000349542) and exon_id (1144672) -->
+	exon_transcript : exon_id (1144672), transcript_id (290278) -->
+		transcript: transcript_id (290278), gene_id (103814) -->
+			gene_stable_id: gene_id (103814), stable_id/ensembl ID (e.g. ENSG00000074855)
+```
+
+I was having a lot of problems trying to save the output of this query (with INTO OUTFILE). You need permissions to write the file onto the host server, which requires `--secure-file-priv` to be set to an empty string (the default value is NULL, which allows no outfile writing). I tried for awhile to get this to work by setting it in `my.cnf` file, but I ran into errors (specifically the "could not update PID file" error). Changing all `mysql` related things to `777` helped, but resulted in `mysql` not reading `my.cnf` file, a real Catch-22 that drove me crazy for half a day. I finally figured out a work around where you can call the query from the command line, with some extra options enabled, and pipe that to a file.
+
+Prettily formatted query:
+
+```
+select 
+	gene_stable_id.stable_id, exon_stable_id.stable_id, transcript_stable_id.stable_id
+from
+	gene_stable_id, transcript, transcript_stable_id, exon_transcript, exon, exon_stable_id
+where
+	gene_stable_id.gene_id = transcript.gene_id and
+	transcript_stable_id.transcript_id = exon_transcript.transcript_id and
+	transcript.transcript_id = exon_transcript.transcript_id and
+	exon_transcript.exon_id = exon.exon_id and
+	exon.exon_id = exon_stable_id.exon_id and
+	exon_stable_id.stable_id in (select id from splicemod_ids);
+```
+
+Command line, which you can copy and paste:
+
+```
+mysql -u ensembl homo_sapiens_core_63_37 -s -r -e \
+'select distinct gene_stable_id.stable_id, transcript_stable_id.stable_id, exon_stable_id.stable_id \
+from gene_stable_id, transcript, transcript_stable_id, exon_transcript, exon, exon_stable_id \
+where gene_stable_id.gene_id = transcript.gene_id and transcript_stable_id.transcript_id = exon_transcript.transcript_id and transcript.transcript_id = exon_transcript.transcript_id and exon_transcript.exon_id = exon.exon_id and exon.exon_id = exon_stable_id.exon_id and \
+exon_stable_id.stable_id in (select id from splicemod_ids)' > ensembl_exon_gene_id_mapping.txt
+```
+
+```{r mapping}
+# load mapping from MySQL query
+mapping <- read.table(file = '../produced_data/ensembl_exon_gene_id_mapping.txt', 
+                      col.names = c('ensembl_gene_id', 'ensembl_transcript_id', 'ensembl_exon_id'))
+
+# grab the latest release, release 87, hg38
+mart <- useMart('ENSEMBL_MART_ENSEMBL', dataset = 'hsapiens_gene_ensembl')
+current_mapping <- getBM(mart = mart, 
+                         attributes = c('ensembl_gene_id', 'ensembl_transcript_id', 'ensembl_exon_id', 'chromosome_name', 
+                                        'start_position', 'end_position', 'strand', 'transcript_start', 'transcript_end'), 
+                         filters = c('ensembl_gene_id'),
+                         values = mapping$ensembl_gene_id)
+```
+
+There are 2,244 exon IDs corresponding to 1604 gene IDs. Mapping from the past release to the current release by gene ID, 99.1% (1590/1604) of IDs matched exactly. However, mapping by exon IDs, only 38% (860/2244) match exactly. When matching by transcript ID, 80% (4932/6155) match exactly. 
+
+```{r}
+# load data
+data <- readRDS('../produced_data/exac_data_clean.rds')
+# add position information to mapping
+mapping <- left_join(select(data, ensembl_exon_id = ensembl_id, chromosome_name = chr, start_position = start, 
+                                   end_position = end, strand), mapping, by = 'ensembl_exon_id') %>% distinct()
+# combine current mapping with past
+combined_mapping <- left_join(mapping, current_mapping, by = 'ensembl_transcript_id', suffix = c('_old', '_new'))
+
+# reorder for clarity
+combined_mapping <- select(combined_mapping, ensembl_transcript_id, ensembl_gene_id_old, ensembl_gene_id_new, ensembl_exon_id_old, ensembl_exon_id_new, chromosome_name_old, chromosome_name_new, start_position_old, start_position_new, end_position_old, end_position_new, strand_old, strand_new, transcript_start, transcript_end)
+
+# remove last row which is NA
+combined_mapping <- combined_mapping[-144824,]
+# change strand
+combined_mapping$strand_new <- gsub('-1', '-', combined_mapping$strand_new)
+combined_mapping$strand_new <- gsub('+1', '+', combined_mapping$strand_new)
+```
+
+We need to convert the old genome positions (GRCh37/hg19) to the new genome positions (GRCh38/hg38). The appropriate chain file is needed to convert between hg38 and hg19, which can be retrieved with `wget http://hgdownload.cse.ucsc.edu/goldenPath/hg38/liftOver/hg38ToHg19.over.chain.gz`.
+
+```{r coordinate_convert, echo=F}
+# import chain file for conversion
+chain <- import.chain('../ref/hg38toHg19.over.chain')
+# create GRanges of intervals to lift-over from the start and end positions
+intervals <- GRanges(seqnames = combined_mapping$ensembl_transcript_id, 
+                     ranges = IRanges(start = combined_mapping$start_position_old, end = combined_mapping$end_position_old),
+                     strand = combined_mapping$strand_old)
+
+updated_intervals <- liftOver(intervals, chain)
+```
+
+I tried using `rtracklayer`, but I got an error (adding class "factor" to an invalid object) and a cursory search turned up no results, so I defaulted to using UCSC's web interface for the liftover tool (which `rtracklayer` is based on). I outputted the necessary mapping information, used a quick series of python commands to get into the correct version, and loaded the file into the web interface (http://genome.ucsc.edu/cgi-bin/hgLiftOver). The sequences that correspond to random exons and have chromosome `NA` will not be lifted over, so expect those results to fail.
+
+```
+# R command
+write.table(combined_mapping, '../produced_data/combined_mapping.txt', quote=F, row.names=F, col.names = F, sep='\t')
+
+# python commands
+infile = open("combined_mapping.txt")
+outfile = open('coordinates_for_liftover.txt', 'w')
+for line in infile:
+    fields = line.strip().split('\t')
+    # needs to be in format chrN:start-end
+    outfile.write('chr' + str(fields[5]) + ':' + str(fields[7]) + '-' + str(fields[9]) + '\n')
+```
+
+```{r}
+# read in conversion
+conversion <- read.table('genome_conversion_ucsc_liftover.bed')
+```
+
+
