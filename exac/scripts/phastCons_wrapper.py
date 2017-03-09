@@ -12,7 +12,7 @@ import multiprocessing
 from functools import partial
 
 
-# wig functions courtesty of Chris Hartl
+# wig functions courtesy of Chris Hartl
 class WigReader(object):
     def __init__(self, file_):
         self._handle = gzip.open(file_) if file_.endswith('gz') else open(file_)
@@ -75,31 +75,6 @@ def get_interval(itr, interval, curr_base=None):
     # note: will always yield one base outside of region so that no base
     # is ever skipped
 
-
-# def bed_iter(filename):
-# 	"""
-# 	Iterate through a bed file, yielding all intervals for one chromosome
-# 	"""
-# 	with open(filename) as bed:
-# 		# initialize 
-# 		chr_info = []
-# 		interval = next(bed).strip().split('\t')
-# 		# format: chr, start, end, name
-# 		curr_chrom = interval[0]
-# 		chr_info.append(interval)
-# 		for line in bed:
-# 			interval = line.strip().split('\t')
-# 			chrom = interval[0]
-# 			if chrom != curr_chrom:
-# 				yield chr_info
-# 				chr_info = []
-# 				print curr_chrom, chrom
-# 				curr_chrom = chrom
-# 			else:
-# 				chr_info.append(interval)
-# 			if not line: # end of file
-# 				print "Hello"
-# 				yield chr_info
 
 def bed_iter(filename):
 	"""
@@ -197,7 +172,7 @@ if __name__ == '__main__':
 	parser.add_argument('bed', help='BED file of interval regions.')
 	parser.add_argument('cons_folder', help='path to folder with compressed phastCons files')
 	parser.add_argument('output', help='name of output file')
-	parser.add_argument('num_processes', type=int, default=3,
+	parser.add_argument('--num_processes', type=int, default=3,
 		help='number of parallel processes')
 
 	args = parser.parse_args()
