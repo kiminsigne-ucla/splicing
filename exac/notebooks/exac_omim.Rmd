@@ -34,21 +34,38 @@ setwd("~/Documents/projects/splicing/exac/notebooks")
 ```
 
 ```{r}
-omim_gene_map <- read.table('../../ref/OMIM/genemap2.txt', 
-                            # header is contained in last comment line
-                            comment.char = '', 
-                            # skip first three lines of comments
-                            skip = 3,
-                            header = T, sep = '\t', fill = T, check.names = F) %>% 
-    rename(Chromosome = `# Chromosome`)
+# omim_gene_map <- read.table('../../ref/OMIM/genemap2.txt', 
+#                             # header is contained in last comment line
+#                             comment.char = '', 
+#                             # skip first three lines of comments
+#                             skip = 3,
+#                             header = T, sep = '\t', fill = T, check.names = F) %>% 
+#     rename(Chromosome = `# Chromosome`)
+# 
+# mim_titles <- read.table('../../ref/OMIM/mimTitles.txt', comment.char = '', skip = 2,
+#                          header = T, sep = '\t', fill = T, check.names = F)
+# 
+# morbid_map <- read.table('../../ref/OMIM/morbidmap.txt', comment.char = '', skip = 3, 
+#                          header = T, sep = '\t', fill = T, check.names = F) %>% 
+#     rename(Phenotype = `# Phenotype`)
 
-mim_titles <- read.table('../../ref/OMIM/mimTitles.txt', comment.char = '', skip = 2,
-                         header = T, sep = '\t', fill = T, check.names = F)
 
-morbid_map <- read.table('../../ref/OMIM/morbidmap.txt', comment.char = '', skip = 3, 
-                         header = T, sep = '\t', fill = T, check.names = F) %>% 
-    rename(Phenotype = `# Phenotype`)
-
+allelic_variants <- read.table('../../ref/OMIM/allelicVariants.txt', colClasses = c(rep('character', 5)),
+                               comment.char = '', skip = 2, header = T, sep = '\t', check.names = F) %>% 
+    rename(allelic_id = `# MIM Number . AV Number`) %>% 
+    mutate(dbSNP = ifelse(dbSNP == '', NA, dbSNP))
 ```
 
+Each OMIM variant is associated with a dbSNP ID. Let's read in our data and use the dbSNP IDs to check if any of the OMIM variants are in our library. I previously added the dbSNP information when including the ExAC annotation.
+
+```{r}
+data <- readRDS('../produced_data/exac_data_cons_scores.rds')
+lib_omim <- data %>% 
+    semi_join(allelic_variants %>% 
+                  filter(!is.na(dbSNP)), by = c('snp_id' = 'dbSNP'))
+
+count(lib_omim)
+```
+
+It looks like none of our ExAC variants in our library are OMIM allelic variants.
 

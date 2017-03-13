@@ -233,7 +233,15 @@ write.table(top_mutants, file = '../produced_data/top_variants_for_crispri.txt',
             row.names = F, quote = F)
 ```
 
-```{r save_data}
+
+Let's add the gene names to each variant, then save the data.
+
+```{r gene_names}
+data <- data %>% 
+    left_join(GO_terms %>% 
+                  select(ensembl_gene_id, external_gene_id) %>% 
+                  distinct(), by = 'ensembl_gene_id') %>% 
+    arrange(desc(mean_cons_score), desc(nat_hek293_exp))
 saveRDS(data, file = '../produced_data/exac_data_cons_exp.rds', compress = T)
 ```
 

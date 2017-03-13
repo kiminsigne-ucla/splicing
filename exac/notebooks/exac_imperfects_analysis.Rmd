@@ -15,7 +15,7 @@ knitr::opts_chunk$set(tidy.opts = list(width.cutoff = 100), tidy = T)
 
 setwd("~/Documents/projects/splicing/exac/notebooks")
 
-data <- readRDS('../produced_data/exac_data_clean.rds')
+data <- readRDS('../produced_data/exac_data_cons_exp.rds')
 ```
 
 
@@ -36,15 +36,10 @@ imperfect_counts <- imperfect_counts %>%
     # lower counts, reads per 100,000 instead of per million
     mutate_each(funs(norm = . / (sum(.) / 100000))) %>% 
     select(ends_with('norm')) %>% # get rid of original un-normalized columns
-    bind_cols(select(imperfect_counts, mutant_id:alignment), .)
-
-# rename for convenience
-colnames(imperfect_counts) <- c('mutant_id', 'ensembl_id', 'mutant_sub_id', 'unknown',
-                                'cigar_string', 'alignment', 'DP_R1', 'DP_R2', 'INT_R1', 
-                                'INT_R2', 'PS_R1', 'PS_R2', 'SP_R1', 'SP_R2')
-
-# filter low reads
-imperfect_counts <- imperfect_counts %>% 
+    bind_cols(select(imperfect_counts, mutant_id:alignment), .) %>% 
+    rename(DP_R1 = DP1S2_norm, DP_R2 = DP2S2_norm, INT_R1 = INT1S2_norm, INT_R2 = INT2S2_norm,
+           PS_R1 = R1.PS_norm, PS_R2 = R2.PS_norm, SP_R1 = SP1S2_norm, SP_R2 = SP2S2_norm) %>% 
+    # filter low reads
     filter(DP_R1 >= 3 | DP_R2 >= 3 | INT_R1 >= 3 | INT_R2 >= 3 | PS_R1 >= 3 | PS_R2 >= 3 | SP_R1 >= 3 | SP_R2 >= 3)
 
 # proportion of cells in each bin (relative to pre-sort)
@@ -67,7 +62,7 @@ imperfect_counts[imperfect_counts == 'NaN'] <- NA
 ```
 
 
-```{r}
+```{r imperfect_index_viz}
 imperfect_fit <- summary(lm(index_R2 ~ index_R1, imperfect_counts))$adj.r.squared 
 ggplot(imperfect_counts, aes(index_R1, index_R2)) + geom_point(alpha = 0.50) +
     labs(x = 'exon inclusion index replicate 1', y = 'exon inclusion index replicate 2',
@@ -76,14 +71,8 @@ ggplot(imperfect_counts, aes(index_R1, index_R2)) + geom_point(alpha = 0.50) +
 ```
 
 
-```{r}
+```{r imperfect_index_hist_viz}
 ggplot(imperfect_counts, aes(index_R1)) + geom_histogram(binwidth = 0.05) +
-    labs(x = 'exon inclusion index replicate 1', 
-         title = 'Distribution of imperfect exon inclusion index')
-```
-
-```{r}
-ggplot(imperfect_counts, aes(index_R1)) + geom_density() +
     labs(x = 'exon inclusion index replicate 1', 
          title = 'Distribution of imperfect exon inclusion index')
 ```
@@ -99,40 +88,10 @@ write.table(unite(imperfect_ref_filtered, header, mutant_id, unknown, cigar_stri
             file = '../ref/exac_imperfect_ref_sorted_filtered.txt', sep = '\t', col.names = F, row.names = F, quote = F)
 ```
 
-Now let's read in the scored imperfects
-```{r}
-imperfects <- read.table('../../splicemod_update/imperfects_scored_filtered.txt', header = F, sep = '\t',
-                         col.names = c('header', 'sequence', 'mutant_score', 'original_score')) %>% 
-    separate(header, c('mutant_id', 'unknown', 'cigar_string', 'md_tag', 'alignment'), sep = ' ') %>% 
-    separate(mutant_id, c('id', 'mutant_sub_id'), sep = '[.]', remove = F) %>% 
-    separate(alignment, c('NM_tag', 'AM_tag'), sep = '[|]') %>% 
-    mutate(mutant_score = as.numeric(mutant_score),
-           original_score = as.numeric(original_score))
-```
-
-Now let's join the splicing index with the imperfect score information 
-
-```{r join_index}
-imperfects <- left_join(imperfects, select(imperfect_counts, mutant_id, index_R1, index_R2), by = 'mutant_id') %>% 
-    filter(!is.na(index_R1) | !is.na(index_R2)) %>% 
-    mutate(mut_diff = original_score - mutant_score)
-```
-
-```{r}
-ggplot(imperfects, aes(mut_diff)) + geom_histogram(binwidth = 1) +
-    labs(x = 'original reference score - imperfect score')
-```
-
-```{r}
-ggplot(imperfects, aes(x = index_R1, y = mut_diff)) + geom_point() +
-    labs(x = 'exon inclusion index replicate 1', y = 'original reference score - \nimperfect score') +
-    geom_hline(yintercept = 0) +
-    theme(axis.title.y = element_text(angle = 0))
-```
 
 Let's join the imperfect data and the original data and see how their distributions compare.
 
-```{r}
+```{r imperfect_vs_perfect_viz}
 ggplot(bind_rows(select(data, id, index_R1) %>% mutate(type = 'perfect'),
                  mutate(imperfect_counts, type = 'imperfect') %>% 
                      select(id = mutant_id, index_R1, type)), aes(index_R1)) +
@@ -141,13 +100,145 @@ ggplot(bind_rows(select(data, id, index_R1) %>% mutate(type = 'perfect'),
     labs(x = 'exon inclusion index replicate 1')
 ```
 
-```{r}
+```{r diff_psi_viz}
 # calculate difference in splicing index between imperfect and perfect reference sequence
-imperfects <- left_join(imperfects, select(data, id, index_R1_perfect = index_R1), by = 'id') %>% 
-    mutate(dpsi = index_R1_perfect - index_R1)
-
-ggplot(imperfects, aes(x = dpsi, y = mut_diff)) + geom_point(alpha = 0.50) +
-    labs(x = 'exon inclusion index perfect - \n exon inclusion index imperfect', y = 'original perfect score - \n imperfect score') + 
-    theme(axis.title.y = element_text(angle = 0))
+ggplot(imperfect_counts %>% 
+    left_join(select(data, id, index_R1_perfect = index_R1), by = c('ensembl_id' = 'id')) %>% 
+    mutate(dpsi = index_R1_perfect - index_R1), aes(dpsi)) +
+    geom_histogram(binwidth = 0.10) + 
+    labs(x = 'perfect PSI - imperfect PSI')
 ```
+
+Let's get the imperfect data to look like our perfect data so we can incorporate it into future analysis. The ExAC library
+consists of 1 nt SNP variants, so we will only consider imperfects that are different by 1 nt. We can find these variants by parsing the cigar string for those with only 1 mismatch (X - mismatch, I - insertion, D - deletion). For each imperfect variant, we need to add the matching intron/exon lengths from the corresponding perfect sequence, the imperfect sequence, and the location of the SNP (really an SNV). 
+
+```{r format_imperfects}
+cigar <- imperfect_counts$cigar_string
+mismatches <- cigar[grepl('1X', cigar)]
+mismatches <- mismatches[!grepl('D', mismatches)]
+
+imperfect_snp <- imperfect_counts %>% 
+    filter(stringr::str_count(cigar_string, '1X') == 1, 
+           !grepl('D', cigar_string), 
+           !grepl('I', cigar_string)) %>% 
+    # add sequence
+    left_join(select(imperfect_ref, mutant_id, sequence), by = 'mutant_id') %>% 
+    left_join(select(data, id, perfect_sequence = sequence, chr:category, start_hg38, end_hg38), by = c('ensembl_id' = 'id')) %>% 
+    # only keep those that appear in cleaned up data 
+    filter(!is.na(start)) %>% 
+    # only keep those whose sequence is 170bp
+    filter(nchar(sequence) == 170)
+
+count(imperfect_snp)
+
+
+find_mismatch <- function(string1, string2) {
+    a <- unlist(strsplit(string1, split = ''))
+    b <- unlist(strsplit(string2, split = ''))
+    
+    loc <- which(a != b)
+    
+    if (length(loc) > 1) { return(-1) }
+    else {return(loc) }
+}
+
+imperfect_snp$rel_position <- mapply(find_mismatch, imperfect_snp$sequence, imperfect_snp$perfect_sequence)
+
+saveRDS(imperfect_snp, '../produced_data/exac_imperfects.rds', compress = T)
+```
+
+Let's take a quick look at the conservation of the "imperfect" SNP positions
+
+```{r cons_write_input}
+# add SNP position in hg38 coordinates
+imperfect_snp <- imperfect_snp %>% 
+    # start position always less than end position, regardless of strand
+    mutate(snp_position_hg38 = start_hg38 + rel_position,
+           snp_position_end_hg38 = snp_position_hg38 + 1) # need at least 1 bp interval
+
+# output bed file of SNP positions 
+write.table(file = '../produced_data/imperfect_snp_positions.bed', 
+            x = imperfect_snp %>% 
+                select(chr, snp_position_hg38, snp_position_end_hg38, mutant_id) %>% 
+                na.omit() %>% 
+                mutate(chr = paste0('chr', chr)), 
+            sep = '\t', col.names = F, row.names = F, quote = F)
+```
+
+```{bash bedtools_sort}
+bedtools sort -i ../produced_data/imperfect_snp_positions.bed > ../produced_data/imperfect_snp_positions_sorted.bed
+```
+
+```{python phast_cons, eval = F}
+# usage: python phastCons_wrapper.py <sorted input bed file> <phastCons folder> <output file name> <num processes>
+python ../scripts/phastCons_wrapper.py ../produced_data/imperfect_snp_positions_sorted.bed ../../ref/phastCons ../produced_data/imperfect_snp_positions_cons.bed
+```
+
+```{r conservation}
+cons_scores <- read.table('../produced_data/imperfect_snp_positions_cons.bed', sep = '\t', 
+                          col.names = c('chr', 'start', 'end', 'mutant_id', 'mean_cons_score'))
+
+# convert NaN to NA
+cons_scores[is.na(cons_scores)] <- NA
+
+imperfect_snp <- left_join(imperfect_snp, select(cons_scores, mutant_id, mean_cons_score), by = 'mutant_id')
+
+ggplot(imperfect_snp, aes(mean_cons_score)) + 
+    geom_histogram() +
+    labs(x = 'SNP conservation score', title = 'Conservation scores for imperfect variants')
+```
+
+Let's bring in the ExAC annotation
+
+```{r exac_input}
+# write file of regions of SNPs for input to tabix
+write.table(imperfect_snp %>%
+                mutate(chr = gsub('chr', '', chr),
+                       snp_region = paste0(chr, ':', snp_position_hg38, '-', snp_position_end_hg38)) %>%
+                select(snp_region) ,
+            file = '../produced_data/tabix_input_imperfect_snp_regions.txt',
+            quote = F, row.names = F, col.names = F, sep = '\t')
+```
+
+```{bash get_exac_annot, eval = F}
+while read line; do
+    tabix ../ref/ExAC.r0.3.1.sites.vep.vcf.gz $line >> ../ref/imperfect_snp_exac_annot.txt
+done < ../produced_data/tabix_input_imperfect_snp_regions.txt
+```
+
+```{r exac}
+exac_annot <- read.table('../ref/imperfect_snp_exac_annot.txt', sep = '\t', header = F)
+colnames(exac_annot) <- c('chr', 'position', 'snp_id', 'ref_allele', 'alt_allele', 'quality', 'filter', 'info')
+# get info column names
+# split by ';', separates info columns
+example_info <- unlist(strsplit(exac_annot$info[1], split = ';'))
+# get names only, e.g. key=value
+info_names <- unlist(lapply(strsplit(example_info, split = '='), `[[`, 1))
+exac_annot <- separate(exac_annot, info, into = info_names, sep = ';') %>%
+    # from info fields, only save CSQ, only one we care about right now
+    select(chr:filter, CSQ)
+
+# parse CSQ column, consequence annotations from Ensembl VEP (Variant Effect Predictor). Description of fields taken from header of vcf file
+csq_fields <- 'Allele|Consequence|IMPACT|SYMBOL|Gene|Feature_type|Feature|BIOTYPE|EXON|INTRON|HGVSc|HGVSp|cDNA_position|CDS_position|Protein_position|Amino_acids|Codons|Existing_variation|ALLELE_NUM|DISTANCE|STRAND|VARIANT_CLASS|MINIMISED|SYMBOL_SOURCE|HGNC_ID|CANONICAL|TSL|CCDS|ENSP|SWISSPROT|TREMBL|UNIPARC|SIFT|PolyPhen|DOMAINS|HGVS_OFFSET|GMAF|AFR_MAF|AMR_MAF|ASN_MAF|EAS_MAF|EUR_MAF|SAS_MAF|AA_MAF|EA_MAF|CLIN_SIG|SOMATIC|PHENO|PUBMED|MOTIF_NAME|MOTIF_POS|HIGH_INF_POS|MOTIF_SCORE_CHANGE|LoF_info|LoF_flags|LoF_filter|LoF|context|ancestral'
+csq_fields <- unlist(strsplit(csq_fields, split = '[|]'))
+exac_annot <- separate(exac_annot, CSQ, into = csq_fields, sep = '[|]') %>%
+    mutate(Allele = gsub('CSQ=', '', Allele))
+
+exac_annot <- exac_annot %>%
+    mutate(annot = strsplit(Consequence, '&')) %>%
+    unnest(annot) %>%
+    select(chr:Allele, -Consequence, annot, IMPACT:ancestral) %>%
+    distinct()
+
+# join exac data
+imperfect_snp <- imperfect_snp %>%
+        mutate(chr = as.numeric(gsub('chr', '', chr))) %>% 
+        left_join(select(exac_annot, chr, position, annot),
+                 by = c('chr', 'snp_position_hg38' = 'position'))
+
+count(exac_annot)
+table(imperfect_snp$annot)
+```
+
+Only 9 imperfect variants have ExAC annotation and only 1 has functional annotation as an intron variant.
 

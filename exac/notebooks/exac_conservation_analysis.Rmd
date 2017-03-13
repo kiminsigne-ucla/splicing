@@ -320,6 +320,7 @@ Variants that cause a large change in dPSI (> =.80) tend to be highly conserved,
 # write file of regions of SNPs for input to tabix
 write.table(data %>%
                 mutate(chr = gsub('chr', '', chr),
+                       # ExAC built on hg19, supply region to tabix works properly
                        snp_region = paste0(chr, ':', snp_position, '-', snp_position + 1)) %>%
                 select(snp_region) ,
             file = '../produced_data/tabix_input_snp_regions.txt',
@@ -336,7 +337,9 @@ done < ../produced_data/tabix_input_snp_regions.txt
 
 Now, let's read in the ExAC annotation for our SNPs.
 
+chr 15, 42684847
 ```{r parse_exac}
+# this will be ~2x as big as the number of SNPs because 2bp were extracted for each SNP
 exac_annot <- read.table('../ref/snp_exac_annot.txt', sep = '\t', header = F)
 colnames(exac_annot) <- c('chr', 'position', 'snp_id', 'ref_allele', 'alt_allele', 'quality', 'filter', 'info')
 # get info column names
@@ -366,7 +369,7 @@ exac_annot <- exac_annot %>%
 # join exac data
 data <- data %>%
         mutate(chr = as.numeric(gsub('chr', '', chr))) %>% 
-        left_join(select(exac_annot, chr, position, annot),
+        left_join(select(exac_annot, chr, position, snp_id, annot),
                  by = c('chr', 'snp_position' = 'position'))
 
 # for each annotation category, calculate the average conservation score
